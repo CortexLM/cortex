@@ -106,10 +106,28 @@ under S31's 8 and 512 (4,104 objects) and refuses the 4,105th [V, in-process]. A
 zero, or above the protocol bound, is refused with nothing left [V]. Only `admission_policy_hash` moves, so the run
 id; the dry run prints `artifact_limits` and checks them (`artifact_limits_of_the_knobs`) [V].
 
+`HT_D20_AUDITORS=N` (2..9, default 2; any geometry), `HT_D20_AUDIT_LANES=L` (1..9; any geometry) and, together,
+`HT_D20_AUDIT_CYCLE_SECONDS=S`, `HT_D20_AUDIT_ROSTER=A` and `HT_D20_AUDIT_HOSTS=K` (these geometries only) are the
+knobs of ADR 0018 (optional) [V in-process, `test_b300_d20_builder.py`]. `HT_D20_AUDITORS` seeds and lists N
+auditors (`training.auditors`, so the training and the run id move: the warm-up must list the same N, its seeds
+copied with the others in step 6, or the real build's `warmup_same_training` fails). `HT_D20_AUDIT_LANES` makes the
+audit policy sign `max_running_jobs = L` (L above N is refused by the first stage: one live lease per auditor).
+The three others make it sign `first_window_rounds = first_window_rounds_for(A, P, S, 100)`, P being the least of
+the lanes, N and K, S the MEASURED largest lease-to-complete of one audit at P lanes on as many executor hosts,
+whole seconds; a window above the policy's gap cap is refused by the first stage (raise `HT_D20_AUDIT_GAP_ROUNDS`).
+Only `audit_policy_hash` moves (and the training for N); the dry run prints `audit_lanes` and checks them
+(`listed_auditors`, `audit_lanes_of_the_knob`, `first_window_of_the_cycle`) [V]. A round of such a run must be
+opened at a gap of at least the window (`live_operator.py open` refuses less), plus the rearm room wanted. Each lane
+needs an auditor container that polls and an executor host; `test_auditors.sh` still starts two containers. Nothing
+has run with them [A, ADR 0018].
+
 **Images.** The challenge serves the signed bounds in every `JoinChallenge` (`challenge/admission.py`), and code
 before `bc306dc` refuses the two fields (`extra_forbidden`): a run built with a knob needs its server image and the
 GPU image its miners and references run built from `bc306dc` or later [V on the `667695be` source:
-`extra_forbidden`; GPU `cb52fe37` is built from `667695be` [A], forge journal 2026-10-29 21:13Z].
+`extra_forbidden`; GPU `cb52fe37` is built from `667695be` [A], forge journal 2026-10-29 21:13Z]. A run that signs lanes other
+than 2 or a first window needs a server image that holds ADR 0018: older code refuses its audit policy
+(`literal_error`, `extra_forbidden`); the auditor, miner and GPU images never parse it [V by reading, ADR 0018 Part
+2.6].
 `implementation_hash` does not tell those images apart.
 
 **Warm-up.** Build the warm-up without the knobs: they do not change what it measures. With a knob the real build's
@@ -256,8 +274,8 @@ for r in rows:
 7. **Dry-run comparison, before the real run is published.** The real build's dry run already compares the two
    manifests (its `warmup_*` checks and `warmup_run_id`, step 6). The two dry runs print the same `param_count`,
    `init_state_hash` and `pin`; only `run_id`, `envelope_sha256`, `audit` and `warmup_run_id` differ, and
-   `artifact_limits` when the real build sets `HT_D20_MAX_REFS` or `HT_D20_MAX_PARTS`. Then, on the build host, the
-   same comparison on the input files:
+   `artifact_limits` when the real build sets `HT_D20_MAX_REFS` or `HT_D20_MAX_PARTS`, `audit_lanes` when it sets the
+   lane or first-window knobs. Then, on the build host, the same comparison on the input files:
 
 ```bash
 python3 -I - "$WARM" "$OUT" <<'PY'
@@ -267,7 +285,8 @@ w, r = (Path(p) for p in sys.argv[1:3])
 read = lambda d, n: json.loads((d / n).read_bytes())
 assert (w / "inputs/training.json").read_bytes() == (r / "inputs/training.json").read_bytes()
 p = [read(d, "inputs/policies.json") for d in (w, r)]
-print([{k: x["audit"].pop(k, None) for k in ("reaudit_rounds", "gap_cap_rounds")} for x in p])
+window = ("reaudit_rounds", "gap_cap_rounds", "max_running_jobs", "first_window_rounds")
+print([{k: x["audit"].pop(k, None) for k in window} for x in p])
 limits = p[1]["admission"]["artifact_limits"]  # the knobs sign their bounds in the real run only
 knobs = {k: limits.pop(k) for k in ("max_refs", "max_parts") if k in limits}
 print(knobs)
@@ -284,10 +303,12 @@ PY
    It prints the two windows (`reaudit_rounds` 200 and `gap_cap_rounds` 305 for the warm-up) and the real run's
    artifact bounds, and exits 0 only if `training.json` is the same (image digest, model, init state), the policies
    differ only in `audit.reaudit_rounds` and `gap_cap_rounds` (and the real run's `admission.artifact_limits`
-   `max_refs`/`max_parts`), and the manifests differ only in `network.audit_policy_hash` (and then
+   `max_refs`/`max_parts`, and its `audit.max_running_jobs` and `first_window_rounds` when it sets the ADR 0018
+   knobs), and the manifests differ only in `network.audit_policy_hash` (and then
    `network.admission_policy_hash`): the checks of `test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window`
    [V]. The command was run on the S20 warm-up against the rebuilds of `0ef600b4` with and without the knobs
-   (v3-builder-run-knobs) [V].
+   (v3-builder-run-knobs) [V], and on in-process warm-up and real builds with the ADR 0018 knobs (adr0017-t3) [V].
+   With `HT_D20_AUDITORS` the warm-up lists the same auditors, so `training.json` is the same.
 8. **Publish the real run for the 5 real identities.** Its per-run steps of sections 1 and 3, in a gated window
    with no trial open: `cuda_qualification.py`, `relay_config.py`, `mk_exec_config.sh` on its run id,
    `mk_origins.py`; `challenge_image.sh executor $B <new container path> [--r2 /data/executor/r2.env

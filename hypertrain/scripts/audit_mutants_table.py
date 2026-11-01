@@ -216,6 +216,17 @@ HOLD_RELAY = (
 PLAN_FIRST = PLAN + "test_a_signed_first_window_moves_every_bound_that_waits_on_the_first_window"
 PLAN_MISSED = PLAN + "test_a_round_whose_audit_window_passed_without_jobs_is_marked"
 WINDOW_GAP = LIVE_TESTS + "test_open_refuses_a_gap_below_the_signed_first_window"
+BUILDER_SH = "scripts/b300/d20/build_test_manifest.sh"
+BUILDS = "tests/test_b300_d20_builder.py::"
+UNSET_KNOBS = BUILDS + "test_without_the_lane_knobs_a_build_lists_two_auditors_and_signs_two_lanes"
+S17D_SHAPE = (
+    BUILDS + "test_without_the_audit_gap_knob_the_31m_run_signs_the_audit_policy_of_f3901a09"
+)
+S20_SHAPE = BUILDS + "test_without_the_artifact_knobs_the_s20_inputs_build_what_they_built_before"
+LANE_KNOBS = BUILDS + "test_the_lane_knobs_sign_the_lanes_and_list_the_auditors_and_nothing_else"
+WINDOW_KNOBS = BUILDS + "test_the_first_window_knobs_sign_the_window_of_the_measured_cycle"
+OTHER_AUDITORS = BUILDS + "test_a_warm_up_that_lists_other_auditors_did_not_measure_the_run"
+BAD_KNOBS = BUILDS + "test_a_lane_or_window_knob_the_run_cannot_take_is_refused_and_leaves_nothing"
 LANE_TERMS = "            self.max_queued_jobs, len(set(training.auditors))\n"
 WINDOW_RANGE_T3 = (
     "            self.absolute_rounds() <= self.first_window_rounds <= self.gap_cap()\n"
@@ -925,5 +936,49 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "    if audit.first_window_rounds is not None and gap < audit.first_window_rounds:\n",
         "    if audit.first_window_rounds is not None and gap <= audit.first_window_rounds:\n",
         (WINDOW_GAP + "[254-True]",),
+    ),
+    (
+        "the builder signs one lane when the lane knob is unset",
+        BUILDER_SH,
+        'if lanes:\n    policies["audit"]["max_running_jobs"] = int(lanes)\n',
+        'if True:\n    policies["audit"]["max_running_jobs"] = int(lanes or 1)\n',
+        (UNSET_KNOBS, S17D_SHAPE, S20_SHAPE),
+    ),
+    (
+        "the builder signs a first window for a measured build that set no window knob",
+        BUILDER_SH,
+        'if cycle:\n    audit = policies["audit"]\n',
+        "if cycle or geometry in MEASURED:\n"
+        '    cycle, roster, hosts = cycle or "229", roster or "5", hosts or "2"\n'
+        '    audit = policies["audit"]\n',
+        (S20_SHAPE,),
+    ),
+    (
+        "the auditor knob is ignored: every build lists two auditors",
+        BUILDER_SH,
+        'AUDITORS = tuple(f"auditor-{i}" for i in range(int(auditors)))\n',
+        'AUDITORS = ("auditor-0", "auditor-1")\n',
+        (LANE_KNOBS + "[three_lanes_three_auditors]", OTHER_AUDITORS),
+    ),
+    (
+        "the first window ignores the executor hosts",
+        BUILDER_SH,
+        '    parallel = min(audit["max_running_jobs"], int(auditors), int(hosts))\n',
+        '    parallel = min(audit["max_running_jobs"], int(auditors))\n',
+        (WINDOW_KNOBS + "[three_lanes_on_two_hosts]",),
+    ),
+    (
+        "lanes above the auditors reach the manifest stage",
+        BUILDER_SH,
+        "if lanes and int(lanes) > int(auditors):\n",
+        "if False:\n",
+        (BAD_KNOBS + "[lanes_above_auditors]",),
+    ),
+    (
+        "a first window above the gap cap reaches the manifest stage",
+        BUILDER_SH,
+        "    if window > cap:\n",
+        "    if False:\n",
+        (BAD_KNOBS + "[window_above_the_gap_cap]",),
     ),
 )
