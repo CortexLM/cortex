@@ -1,4 +1,5 @@
-"""Audit lease liveness: dating, head of line, single flight, cooldown, fail-fast, second window."""
+"""Audit lease liveness: dating, head of line, single flight, cooldown, fail-fast, second window,
+and the lanes and first window an audit policy signs (ADR 0018)."""
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture, as in test_multirun.py)
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ import pytest
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.miner.island_launch import IslandFailure
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.keys import Keypair
 
+from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import (
     AUDITOR_A,
     AUDITOR_B,
@@ -533,6 +536,77 @@ def test_a_second_window_stops_where_the_sealed_commit_stops(network):
     assert (row["state"], row["created"], row["absolute"]) == ("queued", D_AUDIT + 30, d_final)
     served = lease(network, A, 3).json()["body"]  # and the window can still be leased
     assert (served["created_beacon"], served["absolute_deadline"]) == (D_AUDIT + 30, d_final)
+
+
+@pytest.mark.parametrize(
+    ("window", "until"),
+    [(None, D_AUDIT + 8 + 200), (400, D_AUDIT + 400)],
+    ids=["unsigned", "signed"],
+)
+def test_a_job_exhausted_early_is_rearmed_no_shorter_than_its_first_window(
+    monkeypatch, request, window, until
+):
+    """ADR 0018 Part 2.4: two executor failures in the first rounds exhaust a job long before its
+    first window ends; the rearm opens `absolute_rounds()` from now, but never ends before the job's
+    own first window, so a signed one is not cut short."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
+    if window is not None:
+        monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", window)
+    network = request.getfixturevalue("network")
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, n=1, gap=400)  # the commit outlives every window
+    schedule(network)
+    for number, (auditor, at) in enumerate(((A, D_AUDIT + 5), (B, D_AUDIT + 8)), 1):
+        network.push(at)
+        job = lease(network, auditor, number).json()["body"]
+        store._fail_audit_attempt_v2(run, job["job_id"], job["lease_nonce"], RuntimeError("host"))
+    row = lease_row(store, job["job_id"])
+    assert (row["state"], row["created"], row["absolute"]) == ("queued", D_AUDIT + 8, until)
+
+
+# Two more auditors for the lanes: fresh keys, not the fixture's referee (0x73) or relay (0x74)
+EXTRA_AUDITORS = [Keypair(b"\x75" * 32), Keypair(b"\x76" * 32)]
+
+
+@pytest.mark.parametrize("lanes", [1, 3])
+def test_the_signed_lanes_bound_the_leases_that_run_at_once(monkeypatch, request, lanes):
+    """`max_running_jobs` is read from the run's signed audit policy, not a literal 2: four listed
+    auditors poll a round of four jobs, the lanes decide how many get a lease (the control with
+    the unsigned two lanes is `ledger_invariants/test_audit.py`)."""
+    monkeypatch.setattr(fixtures, "AUDITORS", [*fixtures.AUDITORS, *EXTRA_AUDITORS])
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "max_running_jobs", lanes)
+    network = request.getfixturevalue("network")
+    seed_round(network, n=4)
+    schedule(network)
+    codes = [lease(network, a, i).status_code for i, a in enumerate(fixtures.AUDITORS, 1)]
+    assert codes == [200] * lanes + [204] * (4 - lanes)
+
+
+@pytest.mark.parametrize(
+    ("window", "late"),
+    [(None, (D_AUDIT + 200, D_AUDIT + 200)), (300, (D_AUDIT + 250, D_AUDIT + 300))],
+    ids=["unsigned", "signed"],
+)
+def test_a_signed_first_window_gives_a_late_lease_its_full_lease(
+    monkeypatch, request, window, late
+):
+    """At a gap of 400 the first window is `first_window_rounds` (300) instead of two leases; each
+    lease keeps the two-lease bound of `AuditJobV2`, so a lease at d_audit is still served."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
+    if window is not None:
+        monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", window)
+    network = request.getfixturevalue("network")
+    store = network.store
+    seed_round(network, n=2, gap=400)
+    schedule(network)
+    absolute = {r[0] for r in store._db.execute("SELECT absolute FROM audit_leases_v2")}
+    assert absolute == {D_AUDIT + (window or 200)}
+    first = lease(network, A, 1)
+    assert first.status_code == 200, first.text
+    assert first.json()["body"]["absolute_deadline"] == D_AUDIT + 200
+    network.push(D_AUDIT + 150)
+    body = lease(network, B, 2).json()["body"]
+    assert (body["lease_expires"], body["absolute_deadline"]) == late
 
 
 def test_s3_one_poisoned_job_costs_its_miner_not_the_round(network, monkeypatch):

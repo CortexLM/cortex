@@ -52,10 +52,10 @@ def no_reaper(monkeypatch):
     monkeypatch.setattr(ChallengeStore, "_reap_exits_v2", lambda *args, **kwargs: None)
 
 
-def seeded(network, size, silent=()):
+def seeded(network, size, silent=(), gap=200):
     """Round 0 as an open run holds it: every roster member has its genesis anchor (an honest
     silent member too, the fixture gives it none), the `silent` ones never committed."""
-    keys = seed_round(network, n=size, executable=True, silent=silent)
+    keys = seed_round(network, n=size, executable=True, silent=silent, gap=gap)
     cache, manifest = AnchorCache(), network.manifest
     theta = init_params(TrainConfig.from_manifest_v2(manifest).model)
     with network.store._tx():
@@ -478,6 +478,29 @@ def test_a_round_nobody_audited_is_retired_when_its_audit_window_is_gone(
         with pytest.raises(ChallengeError, match="ROUND_RETIRE_REFUSED") as refused:
             retire(network, survivors, cause=cause)
         assert refused.value.status == 409
+        assert snapshot(store, run) == before
+
+
+@pytest.mark.parametrize(("lag", "retired"), [(2, False), (1, True)], ids=["still-open", "missed"])
+def test_a_signed_first_window_keeps_the_audit_window_of_a_round_nobody_audited_open(
+    monkeypatch, request, lag, retired
+):
+    """ADR 0018 Part 2.4: the audit window a retirement checks is the signed first window (400
+    rounds at a gap of 400), not two leases."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 400)
+    network = request.getfixturevalue("network")
+    store, run = network.store, network.manifest.run_id()
+    survivors = [k.ss58 for k in seeded(network, 5, gap=400)]
+    network.push(D_AUDIT)
+    network.push(D_AUDIT + 400 - lag)
+    if retired:
+        done = retire(network, survivors, cause="AUDIT_WINDOW_MISSED")
+        assert (done["cause"], done["retired_beacon"]) == ("AUDIT_WINDOW_MISSED", D_AUDIT + 399)
+    else:
+        before = snapshot(store, run)
+        with pytest.raises(ChallengeError, match="the audit window is still open"):
+            retire(network, survivors, cause="AUDIT_WINDOW_MISSED")
         assert snapshot(store, run) == before
 
 

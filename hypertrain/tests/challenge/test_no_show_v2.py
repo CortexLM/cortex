@@ -10,6 +10,7 @@ import pytest
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.protocol.hashing import sha256_hex
 
+from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import (
     AUDITOR_A,
     D_AUDIT,
@@ -142,3 +143,35 @@ def test_a_job_without_leaves_does_not_starve_the_audits_behind_it(network):
 
     assert response.status_code == 200, response.text
     assert response.json()["body"]["job_id"] == order[1]
+
+
+@pytest.mark.parametrize(
+    ("window", "end"), [(None, D_AUDIT + 200), (400, D_AUDIT + 400)], ids=["unsigned", "signed"]
+)
+def test_a_member_without_leaves_is_dropped_at_the_end_of_the_first_window(
+    monkeypatch, request, window, end
+):
+    """Nobody can lease a job whose leaves were never posted: it waits to the end of its first
+    window, which a signed `first_window_rounds` moves (ADR 0018 Part 2.4), and is dropped there."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
+    if window is not None:
+        monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", window)
+    network = request.getfixturevalue("network")
+    store, run = network.store, network.manifest.run_id()
+    (member,) = seed_round(network, n=1, gap=400)
+    with store._tx():
+        store._db.execute(
+            "DELETE FROM records_v2 WHERE run_id=? AND kind='leaves' AND id=?",
+            (run, f"0:{member.ss58}"),
+        )
+    network.push(D_AUDIT)
+    store.schedule_audits_v2(run, 0)
+
+    def state() -> tuple:
+        row = store._db.execute("SELECT state,result FROM audit_leases_v2").fetchone()
+        return tuple(row)
+
+    network.push(end - 1)
+    assert state() == ("queued", None)
+    network.push(end)
+    assert state() == ("exhausted", "NO_LEAVES")

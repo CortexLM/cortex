@@ -513,6 +513,27 @@ def test_a_round_nobody_scheduled_audits_for_is_retired_without_blaming_anyone(n
     assert set(records(network, "anchor")) >= {f"0:{k.ss58}" for k in keys}
 
 
+def test_the_reaper_holds_a_round_nobody_audited_to_the_end_of_its_signed_first_window(
+    monkeypatch, request
+):
+    """ADR 0018 (Lens m-1): `_reap_round_v2` gives the planner the signed first window (400 rounds
+    at a gap of 400). Two leases in, nothing is asked of the round: no retirement is attempted, so
+    none waits in `round-exit`; it is retired at the end of the signed window."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 400)
+    network = request.getfixturevalue("network")
+    hook = request.getfixturevalue("hook")
+    seeded(network, 5, gap=400)
+    push_through(network, D_AUDIT + 400 - 2)
+    assert records(network, "round-exit") == {} and records(network, "retired") == {}
+
+    push_through(network, D_AUDIT + 400 - 1)
+
+    retired = records(network, "retired")["0"]
+    assert (retired["cause"], retired["retired_beacon"]) == ("AUDIT_WINDOW_MISSED", D_AUDIT + 399)
+    assert records(network, "excluded") == {} and rows_of(network) == {} and hook.calls == []
+
+
 def test_a_retirement_the_run_is_not_ready_for_is_the_reaper_waiting(network, hook):
     # Given: round 0 applied and not finalized, and round 1 opened with a roster nobody committed to
     store, run = network.store, network.manifest.run_id()

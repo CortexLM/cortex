@@ -57,6 +57,7 @@ from hypertrain.protocol.messages_v2 import (
     RosterEntryV2,
     RunManifestV2,
     StartStateV2,
+    TrainingManifestV2,
     WeightAllocationV2,
     WorkProof,
 )
@@ -1209,16 +1210,19 @@ EXAMPLE_AUDIT_RUN_ID = "e0f4c68d67b3e4f47191813d87821efeb718bc2c8bceae81d243ae01
 
 
 def example_audit_policy(steps: int = 2, **extra: JsonValue) -> AuditPolicyV2:
-    """The policy `manifest_v2 example` writes, field by field (H = 1: two replay steps)."""
-    return AuditPolicyV2(
-        lease_rounds=100,
-        max_attempts=2,
-        max_concurrent_per_auditor=1,
-        max_running_jobs=2,
-        max_queued_jobs=32,
-        max_anchor_age_rounds=1,
-        max_steps_per_attempt=steps,
-        **extra,
+    """The policy `manifest_v2 example` writes, field by field (H = 1: two replay steps); `extra`
+    adds a field or overrides one."""
+    return AuditPolicyV2.model_validate(
+        {
+            "lease_rounds": 100,
+            "max_attempts": 2,
+            "max_concurrent_per_auditor": 1,
+            "max_running_jobs": 2,
+            "max_queued_jobs": 32,
+            "max_anchor_age_rounds": 1,
+            "max_steps_per_attempt": steps,
+            **extra,
+        }
     )
 
 
@@ -1319,6 +1323,113 @@ def test_the_published_reaudit_window_is_twice_the_measured_replay_in_beacon_rou
 
     # 3 s per round, rounded up, never below one lease; 301 s is past the cap the verifier enforces
     assert reaudit_rounds_for(replay_seconds, 100) == rounds
+
+
+def with_auditors(count: int) -> TrainingManifestV2:
+    """The example training signed with `count` distinct auditors (2 to 128, the manifest's
+    bound); every other field is the example's."""
+    body = wrapper().training.body()
+    body["auditors"] = [Keypair((100 + i).to_bytes(32, "big")).ss58 for i in range(count)]
+    return wrapper(body).training
+
+
+def test_the_lanes_and_the_first_window_keep_the_digest_and_run_id_while_absent() -> None:
+    """ADR 0018 Part 3: two lanes serialise as before and an absent (or null) first window is
+    omitted, so every policy signed so far keeps its bytes; a set one moves the digest."""
+    policy = example_audit_policy()
+    assert policy.body()["max_running_jobs"] == 2 and "first_window_rounds" not in policy.body()
+    assert policy.first_window() == policy.absolute_rounds() == 200
+    for same in (policy, example_audit_policy(first_window_rounds=None)):
+        assert "first_window_rounds" not in same.body()
+        assert same.digest() == EXAMPLE_AUDIT_DIGEST
+        assert audit_run_id_of(same) == EXAMPLE_AUDIT_RUN_ID
+    wide = example_audit_policy(gap_cap_rounds=400, first_window_rounds=254)
+    assert wide.body()["first_window_rounds"] == 254 and wide.first_window() == 254
+    lanes = example_audit_policy(max_running_jobs=3)
+    assert lanes.body()["max_running_jobs"] == 3
+    for moved in (wide, lanes):
+        assert moved.digest() != example_audit_policy(gap_cap_rounds=400).digest()
+        assert moved.digest() != EXAMPLE_AUDIT_DIGEST
+        assert AuditPolicyV2.model_validate(moved.body()) == moved
+
+
+def test_the_lanes_are_signed_on_a_test_manifest_up_to_the_listed_auditors_and_the_queue() -> None:
+    """The cap lives in `validate_training`, not in the schema: `Positive` accepts 33 lanes, and
+    the door refuses more lanes than distinct auditors (one live lease each) or queued jobs."""
+    steps = 2 * wrapper().training.inner.H
+    for lanes, auditors in ((1, 2), (3, 3), (32, 33)):
+        example_audit_policy(steps, max_running_jobs=lanes).validate_training(
+            with_auditors(auditors), ledger_mode="test"
+        )
+    for lanes, auditors in ((3, 2), (33, 33)):
+        policy = example_audit_policy(steps, max_running_jobs=lanes)
+        with pytest.raises(ValueError, match="lanes must not exceed"):
+            policy.validate_training(with_auditors(auditors), ledger_mode="test")
+    for bad in (0, -1, True, 2.5, "3"):
+        with pytest.raises(ValidationError):
+            example_audit_policy(max_running_jobs=bad)
+
+
+def test_the_first_window_is_signed_between_two_leases_and_the_gap_cap() -> None:
+    training = wrapper().training
+    steps = 2 * training.inner.H
+    for window in (200, 254, 400):
+        example_audit_policy(
+            steps, gap_cap_rounds=400, first_window_rounds=window
+        ).validate_training(training, ledger_mode="test")
+    # never shorter than today's window, never past the widest gap the operator tool opens
+    for window, cap in ((199, 400), (401, 400), (201, None)):
+        policy = example_audit_policy(steps, gap_cap_rounds=cap, first_window_rounds=window)
+        with pytest.raises(ValueError, match="first window must be between"):
+            policy.validate_training(training, ledger_mode="test")
+    for bad in (0, 1, True, 2.5):
+        with pytest.raises(ValidationError):
+            example_audit_policy(first_window_rounds=bad)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"max_running_jobs": 1}, {"max_running_jobs": 3}, {"first_window_rounds": 200}],
+    ids=["one-lane", "three-lanes", "first-window"],
+)
+def test_a_production_manifest_keeps_two_lanes_and_no_first_window(
+    extra: dict[str, int],
+) -> None:
+    """ADR 0018 open question 7 (D161): TEST only for now, at the gap cap's door."""
+    training = with_auditors(3)
+    policy = example_audit_policy(2 * training.inner.H, **extra)
+    policy.validate_training(training, ledger_mode="test")
+    policy.validate_training(training)  # an accepted run checked again: no ledger mode
+    with pytest.raises(ValueError, match="for a TEST manifest only"):
+        policy.validate_training(training, ledger_mode="production")
+    example_audit_policy(2 * training.inner.H).validate_training(training, ledger_mode="production")
+
+
+@pytest.mark.parametrize(("audits", "lanes", "rounds"), [(5, 2, 254), (5, 3, 200), (5, 1, 408)])
+def test_the_published_first_window_is_the_last_wave_of_measured_lane_cycles_and_one_lease(
+    audits: int, lanes: int, rounds: int
+) -> None:
+    from hypertrain.protocol.messages_v2 import first_window_rounds_for
+
+    # a 229 s lease-to-complete is 77 rounds: 3 waves end 2 x 77 + 100 rounds after d_audit;
+    # never below two leases (5 on 3 lanes: 177)
+    assert first_window_rounds_for(audits, lanes, 229, 100) == rounds
+
+
+def test_a_one_lane_first_window_needs_a_gap_cap_that_reaches_it() -> None:
+    from hypertrain.protocol.messages_v2 import first_window_rounds_for
+
+    training = wrapper().training
+    window = first_window_rounds_for(5, 1, 229, 100)
+    for cap, fits in ((400, False), (500, True)):
+        policy = example_audit_policy(
+            2 * training.inner.H, gap_cap_rounds=cap, first_window_rounds=window
+        )
+        if fits:
+            policy.validate_training(training, ledger_mode="test")
+        else:
+            with pytest.raises(ValueError, match="first window"):
+                policy.validate_training(training, ledger_mode="test")
 
 
 def test_audit_lease_when_h_scales_with_step_bound() -> None:
