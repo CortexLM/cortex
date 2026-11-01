@@ -79,15 +79,17 @@ class Schedule:
     d_final: int
     lease_rounds: int
     reaudit_rounds: int  # AuditPolicyV2.reaudit_window(): no default, a caller must name it
+    first_window_rounds: int  # AuditPolicyV2.first_window(): no default either
 
     @property
     def absolute(self) -> int:
-        return min(self.d_final, self.d_audit + 2 * self.lease_rounds)
+        return min(self.d_final, self.d_audit + self.first_window_rounds)
 
     @property
     def audits_end(self) -> int:
-        """Where the second audit window ends at the latest: past it no job waits on anybody."""
-        return self.d_audit + 4 * self.lease_rounds
+        """Where the second audit window ends at the latest: past it no job waits on anybody. A
+        rearm opens it at the end of the first window and it lasts two leases."""
+        return self.d_audit + self.first_window_rounds + 2 * self.lease_rounds
 
     @property
     def reaudit_end(self) -> int:

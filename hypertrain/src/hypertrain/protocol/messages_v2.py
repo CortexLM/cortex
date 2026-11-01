@@ -752,12 +752,28 @@ def reaudit_rounds_for(replay_seconds: int, lease_rounds: int) -> int:
     return max(lease_rounds, -(-2 * replay_seconds // BEACON_PERIOD_SECONDS))
 
 
+def first_window_rounds_for(audits: int, lanes: int, cycle_seconds: int, lease_rounds: int) -> int:
+    """The `AuditPolicyV2.first_window_rounds` to publish for `audits` jobs on `lanes` lanes (ADR
+    0018 Part 2.4): the last of ceil(audits / lanes) waves starts after the lane cycles of the
+    others, converted at `BEACON_PERIOD_SECONDS` a round and rounded up, and gets one full lease;
+    never below two leases. `cycle_seconds` is the largest measured lease-to-complete of the run's
+    model at that lane count on as many hosts; `lanes` is the parallelism the run really has (the
+    least of the lanes, the polling auditors and the executor hosts). With a lease of 100 rounds
+    and a 229 s cycle, five audits: 2 lanes -> 254, 3 lanes -> 200, 1 lane -> 408."""
+    waves = -(-audits // lanes)
+    cycle_rounds = -(-cycle_seconds // BEACON_PERIOD_SECONDS)
+    return max(2 * lease_rounds, (waves - 1) * cycle_rounds + lease_rounds)
+
+
 class AuditPolicyV2(WireModel):
     lease_rounds: Positive
     step_seconds_bound: F32 = "00008040"  # f32 4.0 s per untraced replay step
     max_attempts: Literal[2]
     max_concurrent_per_auditor: Literal[1]
-    max_running_jobs: Literal[2]
+    # Audit leases that may run at once (the lanes, ADR 0018). 2 serialises as before. The schema
+    # takes any `Positive`; `validate_training` caps it at the listed auditors and the queue, and
+    # keeps a value other than 2 for a TEST manifest.
+    max_running_jobs: Positive
     max_queued_jobs: Literal[32]
     max_anchor_age_rounds: Literal[1]
     max_steps_per_attempt: Positive
@@ -772,13 +788,20 @@ class AuditPolicyV2(WireModel):
     gap_cap_rounds: Annotated[StrictInt, Field(ge=DEFAULT_GAP_CAP_ROUNDS, le=2**53 - 1)] | None = (
         Field(default=None, exclude_if=lambda v: v is None)
     )
+    # Rounds after `d_audit` the first audit window of a job lasts at most (ADR 0018); the default
+    # is `absolute_rounds()`. Measured by the publisher (`first_window_rounds_for`), a TEST
+    # manifest only; omitted when absent for the same reason as `reaudit_rounds`.
+    first_window_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
     def validate_training(
         self, training: TrainingManifestV2, *, ledger_mode: str | None = None
     ) -> None:
         """`ledger_mode` is the economics policy's, for the callers that create or build a run. It
         is None where an accepted run is checked again (the schedule of the audits): the TEST-only
-        rule on the gap cap below is enforced once, at the door."""
+        rules on the gap cap, the lanes and the first window below are enforced once, at the
+        door."""
         if self.max_steps_per_attempt != 2 * training.inner.H:
             raise ValueError("audit policy budget must equal 2H")
         if self.lease_rounds != audit_lease_rounds(training.inner.H, self.step_bound()):
@@ -795,6 +818,23 @@ class AuditPolicyV2(WireModel):
             raise ValueError(
                 f"audit gap_cap_rounds above {DEFAULT_GAP_CAP_ROUNDS} is for a TEST manifest only"
             )
+        # One live lease per auditor: lanes beyond the listed auditors, or the queue, never fill.
+        # At 2 the door's own rule holds (two distinct auditors, ChallengeStore.create_run_v2).
+        if self.max_running_jobs > 2 and self.max_running_jobs > min(
+            self.max_queued_jobs, len(set(training.auditors))
+        ):
+            raise ValueError("audit lanes must not exceed the listed auditors or the queue")
+        # Never shorter than today's window, never past the widest gap the operator tool opens.
+        if self.first_window_rounds is not None and not (
+            self.absolute_rounds() <= self.first_window_rounds <= self.gap_cap()
+        ):
+            raise ValueError("audit first window must be between two leases and the gap cap")
+        if ledger_mode not in (None, "test") and (
+            self.max_running_jobs != 2 or self.first_window_rounds is not None
+        ):
+            raise ValueError(
+                "audit lanes other than 2 or a first window are for a TEST manifest only"
+            )
 
     def step_bound(self) -> float:
         bound = f32val(self.step_seconds_bound)
@@ -804,6 +844,14 @@ class AuditPolicyV2(WireModel):
 
     def absolute_rounds(self) -> int:
         return 2 * self.lease_rounds
+
+    def first_window(self) -> int:
+        """Rounds after `d_audit` the first window of every audit job of a round may last (the
+        round's `d_final` may end it sooner): two leases unless the manifest pins the measured
+        value."""
+        return (
+            self.absolute_rounds() if self.first_window_rounds is None else self.first_window_rounds
+        )
 
     def gap_cap(self) -> int:
         """Rounds `d_final - d_audit` may span when the operator tool opens a round."""
