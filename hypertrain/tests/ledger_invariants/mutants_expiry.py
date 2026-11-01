@@ -42,6 +42,15 @@ S21_AGGREGATE = S21 + "test_s21_an_aggregate_retried_on_a_flicker_answers_its_st
 # Branch hotfix-finalize-entry-gate: the finalize's gate judged once, before its replay.
 S21_ENTRY = S21 + "test_a_finalize_refused_at_entry_replays_nothing"
 S21_REPLAY = S21 + "test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_its_entry_round"
+# ADR 0017 T1, FIN-04: the entry gate's pin is written with the round, never alone.
+ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
+PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
+PIN_SETTLED = ATOMIC + "test_a_settled_finalize_keeps_the_one_pin_of_its_gate"
+CANNOT_SETTLE = ATOMIC + "test_finalize_refuses_a_round_that_may_not_settle_and_writes_nothing"
+FIRST_GATE = (
+    "tests/challenge/test_retire_round_v2.py::"
+    "test_a_retired_round_answers_409_round_retired_to_new_work[finalize]"
+)
 
 STORE = "src/hypertrain/challenge/store.py"
 ADMISSION_PY = "src/hypertrain/challenge/admission.py"
@@ -344,9 +353,55 @@ MUTANTS = [
         "invariants": ["FIN-23", "FIN-04"],
         "path": STORE,
         "old": "assert now is not None  # gated above: a finalize record is never removed\n",
-        "new": 'now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")\n',
+        # its own operation: the entry's pin is written below, and the same id would collide
+        "new": 'now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}:again")\n',
         "tests": [S21_REPLAY],
         "why": "the gate is judged after the replay, on the lag the call's own replay made (S21).",
+    },
+    {
+        "id": "exp-finalize-pins-its-gate-at-entry",
+        "invariants": ["FIN-04"],
+        "path": STORE,
+        "old": (
+            '                self._db.execute("SAVEPOINT finalize_gate")\n'
+            "                try:\n"
+            "                    now = self._fresh_v2(manifest, operation)\n"
+            "                    pins = [\n"
+            "                        tuple(row)\n"
+            "                        for row in self._db.execute(\n"
+            '                            "SELECT * FROM beacon_pins_v2 '
+            'WHERE run_id=? AND operation_id=?",\n'
+            "                            (manifest.run_id(), operation),\n"
+            "                        )\n"
+            "                    ]\n"
+            "                finally:\n"
+            '                    self._db.execute("ROLLBACK TO finalize_gate")\n'
+            '                    self._db.execute("RELEASE finalize_gate")\n'
+        ),
+        "new": "                now = self._fresh_v2(manifest, operation)\n",
+        "tests": [PIN_REFUSED, CANNOT_SETTLE + "[an audit is open]"],
+        "why": "a finalize refused after its replay leaves the pin its gate committed at entry.",
+    },
+    {
+        "id": "exp-finalize-loses-the-table-of-its-first-gate",
+        "invariants": ["FIN-04"],
+        "path": STORE,
+        "old": "            FreshnessGate(self._db, manifest.run_id())  # its table: ",
+        "new": "            # ",
+        "tests": [FIRST_GATE],
+        "why": "the first finalize gate of a store leaves no table to write its pin in: a 500.",
+    },
+    {
+        "id": "exp-finalize-drops-the-pin-of-its-gate",
+        "invariants": ["FIN-04"],
+        "path": STORE,
+        "old": (
+            "            self._db.executemany("
+            '"INSERT INTO beacon_pins_v2 VALUES(?,?,?,?,?,?,?)", pins)\n'
+        ),
+        "new": "",
+        "tests": [PIN_SETTLED],
+        "why": "a settled round keeps no trace of the beacon round its gate was judged at.",
     },
     {
         "id": "exp-finalize-replay-compares-nothing",
