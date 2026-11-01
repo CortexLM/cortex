@@ -465,3 +465,134 @@ the switch [A]. INFERRED: the per-round AUDIT_INFRASTRUCTURE is finding 3 [H].
 real size a pre-flight step of every run (the 1 MiB `r2-check` "says nothing about the rate", ADR 0015
 `0015-intermediate-dense-test-model.md:398-400`). Treat the per-round AUDIT_INFRASTRUCTURE as finding 3,
 unless it persists once the first window is widened.
+
+## Decision proposed to the founder: one train
+
+The founder decides (F14). Proposed: one change of `implementation_hash` that carries only owned-body edits,
+built on one integration branch and measured once. Everything that can ship without it ships in the same image
+cycle, or before it.
+
+### Content
+
+| Item | Finding | Owned names edited | State | Size |
+| --- | --- | --- | --- | --- |
+| T1 | 4: the finalize gate at entry, with m1 and m2 closed | `finalize_v2` | written (`c9e612b3`); m1, m2 open; m3 to replay | to estimate |
+| T2 | 5: the charge guard read under the store lock | `_service_charge_v2` | fix and red tests exist (`b3af43f`; a scratch copy gives 3 passed) | to estimate |
+| T3 | 2 and 3: lanes, auditors and the first audit window read from the signed audit policy | `schedule_audits_v2`, `lease_v2`; `open_round_v2` if service runs need it | not designed | to estimate |
+| T4, if chosen | 7 (b): the replay and the aggregate's compute out of process | `_run_finality_replay_v2`, `_aggregate_compute_v2` and callers | not designed; measure first | to estimate |
+| T5, if chosen | 6 (c): a bootstrap path | `open_round_v2`, `_require_survivors_v2`, or none [?] | not designed | to estimate |
+
+T1 and T2 edit `challenge/store.py` only and change no manifest default [V by reading `c9e612b3` and the
+weights-hardening fix]. T3 and T5 can add signed fields omitted when absent, which changes no default either;
+a default changes only if the founder chooses one (finding 6 (a) or (b), or a default window) [H].
+
+### Cost of the single hash change
+
+**What moves** [V].
+- `implementation_hash` under every pin. `24fbe36d…c185ce` (the pin of the s100 runs) and `7af135ca…70be62`
+  (the example pin) become values known only when T1-T5 are frozen. T1 alone gives `8235e5f5…84b5a8` and
+  `2f63fb82…8c3220`, measured on `c9e612b3`.
+- `challenge/store.py`, `sources()` and the bundle, as after any `src` edit: older qualification configs stop
+  matching the new tree and validate only against their own (ADR 0007 `0007-sm-counts-per-arch.md:62-66`) [A].
+
+**What is regenerated, once.**
+- `IMPLEMENTATION_HASH` of `hypertrain/tests/ops/s100/test_run_0ef600b4_golden.py:23`, the only test that pins
+  the hash [V]. `test_run_f3901a09_golden.py` pins that run's id, audit policy `1dd433fe…` and admission
+  policy `7a881925…` (`:18-20`); none moves [V].
+- The strict xfails the train closes: the two of `hypertrain/tests/challenge/test_service_charge_window_v2.py`
+  (T2) and A's `test_a_finalize_whose_own_replay_outlasts_the_cap_settles`
+  (`hypertrain/tests/e2e/test_finalize_freshness_v2_e2e.py:167`), which B replaces with an entry-round test [V
+  on `c9e612b3`]. The mutant tables whose snippets follow the edited code; a moved snippet fails
+  `test_infra_guards.py` until re-anchored, as the beacon lot found
+  (`livrables/forge/2026-10-30_beacon-push-outside-lock/REPORT.md:27-29`) [A].
+- This record's hash rows, measured on the integration branch [H].
+- Only if a builder default changes: the example run id `aa39197d…`
+  (`hypertrain/tests/protocol/test_model_arch.py:28`, `hypertrain/tests/trainer/test_config_v2.py:13`,
+  `hypertrain/tests/protocol/test_od_fields.py:14`) and the example admission digest and run id
+  (`hypertrain/tests/protocol/test_network_v2.py:138-139`) [V].
+
+**What stays frozen.**
+- The run ids, manifests, policies and golden checks of `f3901a09`, `0ef600b4` and `4d84aacc`: none holds
+  `implementation_hash` [V]. Their manifests pin the GPU image `cb52fe37…`
+  (`hypertrain/tests/ops/s100/fixtures/0ef600b4/manifest.json`), built from `667695be` (journal-10 `:1131`)
+  [A].
+- Their identity, not their code. They hold no `service-admission` record, so the new image does not refuse
+  them (`store.py:5557-5562`) [H by reading; A for the 0 rows]. But one challenge image serves every hosted
+  store (`f3901a09`, `0ef600b4`, `4d84aacc`, `07cb8c0d`, `535723b1`), so a later round of any of them runs the
+  new owned bodies [H]. Their miners and executors keep `cb52fe37`'s code: an edit of one of the 12 hashed
+  files the GPU side runs (the trainer, `auditor/replay.py`, `miner/island_launch.py`, `protocol/env_pins.py`)
+  reaches them only through a new GPU image, a new manifest and a new run id (ADR 0007 `:72-74`, ADR 0015
+  `0015-intermediate-dense-test-model.md:516-518`) [A]. T1-T5 as listed edit `store.py` only [H].
+- A service-admitted run must be recreated (`SERVICE_PROFILE_IMMUTABLE`, see Context) [V]; TEST has none [A].
+
+**Images and swap.**
+- A push to `v3` that touches `hypertrain/**` runs `hypertrain-images.yml`: server and GPU images, tag
+  `v3-sha-<sha>`, the commit in a label (so every rebuild has a new digest), provenance attested and verified
+  (`.github/workflows/hypertrain-images.yml:9-16,42-49,105-149`) [V]. Build time: not measured in this lot.
+- The TEST swap (`docs/s100-test-stack.md:38-50`) is gated on a sealed, recent seal of the previous epoch, and
+  runs a backup, a rollback dry run (`paper`), the challenge then the beacon, and checks (`/version`, the
+  image id, the weights replays of epochs 23272 and 23277, the hosted stores before and after) [A]. The last
+  two swaps took 26 s and 23 s from the gate to the checks: 30/10 22:13:30-22:13:56Z (journal-31 `:497`;
+  `livrables/forge/2026-10-30_beacon-push-outside-lock/swap-evidence/swap.txt`) and 31/10 12:53:09-12:53:32Z
+  (`/var/lib/openbot/scratch-forge/s33/evidence/ctl4.log:7-13`, not copied to the share; two invocations ran
+  at once, one stopped with rc 5 and the other swapped) [A].
+- T1-T5 need the server image only [H]. `v3-trial-rounds` needs the GPU image too (finding 1), so a run that
+  uses a wider window is a new run [H].
+
+**Rollback** [A]. `rollback B` restores the backed-up compose and recreates the challenge and the beacon, and
+fails unless the old image id runs again; `restore-db B` restores `challenge.db` and `server_keys.db`, not the
+ledger journal, the child stores or `trials-v2/`; neither is gated (`docs/s100-test-stack.md:73,229-238`). The
+image to return to is `sha256:3bb5db0f…` (code `f357e61`, on TEST since 31/10 12:53Z; `agents/forge.md:45`).
+T1 and T2 add no table and no record kind [H]; a round finalized under T1 keeps its recorded vesting after a
+rollback [H].
+
+### What does not need the train
+
+- Annex A, already on `v3` and on TEST.
+- `v3-trial-rounds` (finding 1) and `v3-miner-fast-path` (hash-neutral, measured; a small gain at 31 M on a
+  real node, journal-31 `:182`): new images only.
+- The `AuditInputError` handler (finding 3); options (a) and (b) of finding 6; a push process apart (finding 7
+  (a)) and its measurement; the node → R2 pre-flight (finding 8); the genesis runbook until the swap (finding
+  5).
+
+### Order and duration
+
+Every duration is to estimate unless a file gives it.
+
+1. F14: the founder approves the content (T1-T3; T4 and T5 or not) and whether it ships before the next TEST
+   run.
+2. One lot per item, red test first, Lens on each: T1 (rebase `c9e612b3`, close m1 and m2, replay m3; Lens
+   could not replay B's e2e under load, `delta-verdicts.md:607`), T2, T3 (design first). To estimate.
+3. One integration branch: the hash measured once, the golden constant updated once, the strict xfails flipped
+   once; Lens on the whole; fast-forward of `v3` on Principal SN100's word. To estimate.
+4. CI images and attestation (build time not measured here); the gated TEST swap (23-26 s for the last two).
+5. A new 31 M TEST run on the new image: an admission of 5 h 18 min (44 clean trials, S31) to 5 h 20 min (52,
+   S20), and a round in about 40 min (S31 round 0, open 18:57:54Z to settled 19:38:16Z, `REPORT-S31.md:78,81`)
+   [A]. It needs a node loan, which D156 holds until F14 [A].
+6. 101 M: not measured; it needs the derived windows of findings 1-3 and the measure of finding 7.
+
+## Rejected
+
+- **One hash change per finding**: each regenerates the same pins and invalidates service-admitted runs again;
+  D120 asks for one.
+- **Rebinding or wrapping an owned method** to keep the hash (D128).
+- **Editing `AuditPolicyV2.absolute_rounds()` in place** (finding 3): signed policies would change meaning
+  under an unchanged hash.
+- **Merging `c9e612b3` as it stands**: m1-m3 open, its parent 30 commits behind `v3`, no CI run.
+- **A production gap cap above 200 alone**: the first window stays `d_audit + 200` (finding 3).
+- **A 4-member roster to open sooner**: AC-CLIFF (D148).
+
+## Not verified
+
+- **31 M only.** No 101 M round has run; every 101 M figure here is a store-level synthetic run, a scaling or
+  one sample.
+- **TEST only.** No production ledger; the genesis path of finding 5 never ran.
+- **Finding 7 observed once in two rounds**, cause not determined; which two ReadTimeouts were lock-free is
+  not stated.
+- The per-round AUDIT_INFRASTRUCTURE as finding 3: timing only; no run widened the first window.
+- The train's own `implementation_hash`: unknown until its content is frozen; the rebase of `c9e612b3` was not
+  tried.
+- The hash values come from CPython 3.12.15; the image's interpreter was not checked, and `ast.dump` output
+  depends on it.
+- The three unmerged lots together (two drafts numbered 0017, two edits of `miner/core.py`): no merge tried.
+- Nothing in this lot ran on s100, a node, a GPU or R2.
