@@ -485,18 +485,18 @@ def test_a_round_nobody_audited_is_retired_when_its_audit_window_is_gone(
 def test_a_signed_first_window_keeps_the_audit_window_of_a_round_nobody_audited_open(
     monkeypatch, request, lag, retired
 ):
-    """ADR 0018 Part 2.4: the audit window a retirement checks is the signed first window (400
-    rounds at a gap of 400), not two leases."""
+    """ADR 0018 Part 2.4: the audit window a retirement checks is the signed first window (300
+    rounds, below the gap cap and the gap of 400, so neither can stand for it), not two leases."""
     monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
-    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 400)
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 300)
     network = request.getfixturevalue("network")
     store, run = network.store, network.manifest.run_id()
     survivors = [k.ss58 for k in seeded(network, 5, gap=400)]
     network.push(D_AUDIT)
-    network.push(D_AUDIT + 400 - lag)
+    network.push(D_AUDIT + 300 - lag)
     if retired:
         done = retire(network, survivors, cause="AUDIT_WINDOW_MISSED")
-        assert (done["cause"], done["retired_beacon"]) == ("AUDIT_WINDOW_MISSED", D_AUDIT + 399)
+        assert (done["cause"], done["retired_beacon"]) == ("AUDIT_WINDOW_MISSED", D_AUDIT + 299)
     else:
         before = snapshot(store, run)
         with pytest.raises(ChallengeError, match="the audit window is still open"):
