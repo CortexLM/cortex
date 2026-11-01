@@ -42,6 +42,10 @@ S21_AGGREGATE = S21 + "test_s21_an_aggregate_retried_on_a_flicker_answers_its_st
 # Branch hotfix-finalize-entry-gate: the finalize's gate judged once, before its replay.
 S21_ENTRY = S21 + "test_a_finalize_refused_at_entry_replays_nothing"
 S21_REPLAY = S21 + "test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_the_round_it_ends"
+PUSHED_MEANWHILE = (
+    "tests/e2e/test_finalize_lock_v2_e2e.py::"
+    "test_a_beacon_round_is_accepted_while_a_finalize_replays_the_tape"
+)
 # ADR 0017 T1, FIN-04: the entry gate's pin is written with the round, never alone.
 ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
 PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
@@ -370,6 +374,33 @@ MUTANTS = [
         "new": "                not self._db.execute(\n",
         "tests": [BOUNDARY],
         "why": "a service-admitted finalize meets the beacon gate before its boundary refuses it.",
+    },
+    {
+        "id": "exp-finalize-dated-at-the-stale-view",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "            now = max(now, self._now(self._db), emitted - MAX_LAG_ROUNDS)\n",
+        "new": "            now = max(now, self._now(self._db))\n",
+        "tests": [S21_REPLAY],
+        "why": "a round whose replay kept the pusher out vests from a round its replay outlasted.",
+    },
+    {
+        "id": "exp-finalize-dated-past-a-healthy-view",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "            now = max(now, self._now(self._db), emitted - MAX_LAG_ROUNDS)\n",
+        "new": "            now = max(now, self._now(self._db), emitted)\n",
+        "tests": [S21_REPLAY],
+        "why": "a round closes at a round no healthy view holds yet, later than every other gate.",
+    },
+    {
+        "id": "exp-finalize-dated-without-its-view",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "            now = max(now, self._now(self._db), emitted - MAX_LAG_ROUNDS)\n",
+        "new": "            now = max(now, emitted - MAX_LAG_ROUNDS)\n",
+        "tests": [PUSHED_MEANWHILE],
+        "why": "a round closes before the view it was settled at when beacons land in its replay.",
     },
     {
         "id": "exp-finalize-pins-its-gate-at-entry",
