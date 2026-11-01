@@ -46,6 +46,9 @@ PUSHED_MEANWHILE = (
     "tests/e2e/test_finalize_lock_v2_e2e.py::"
     "test_a_beacon_round_is_accepted_while_a_finalize_replays_the_tape"
 )
+S21_UNSIGNED = (
+    S21 + "test_an_unauthenticated_finalize_is_refused_before_its_gate_and_writes_nothing"
+)
 # ADR 0017 T1, FIN-04: the entry gate's pin is written with the round, never alone.
 ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
 PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
@@ -351,7 +354,7 @@ MUTANTS = [
         "id": "exp-finalize-skips-the-expiry-at-its-gate",
         "invariants": ["FIN-23", "FIN-04"],
         "path": STORE,
-        "old": "                if now > envelope_v2.parse_envelope(raw).exp_drand:\n",
+        "old": "                if now > env.exp_drand:\n",
         "new": "                if False:\n",
         "tests": [S21_ENTRY],
         "why": "a Finalize expired at the round it settles at is replayed before it is refused.",
@@ -401,6 +404,33 @@ MUTANTS = [
         "new": "            now = max(now, emitted - MAX_LAG_ROUNDS)\n",
         "tests": [PUSHED_MEANWHILE],
         "why": "a round closes before the view it was settled at when beacons land in its replay.",
+    },
+    {
+        "id": "exp-finalize-gate-before-its-authentication",
+        "invariants": ["FIN-01", "FIN-23"],
+        "path": STORE,
+        "old": (
+            '            envelope_v2.Intake(run_id, {"Finalize": '
+            "manifest.training.coord_pubkey.__eq__}).accept(\n"
+            "                raw, self._now(self._db)\n"
+            "            )\n"
+        ),
+        "new": "",
+        "tests": [S21_UNSIGNED],
+        "why": "a Finalize nobody signed meets the gate and the expiry before its signature.",
+    },
+    {
+        "id": "exp-finalize-gate-before-its-type",
+        "invariants": ["FIN-01", "FIN-23"],
+        "path": STORE,
+        "old": (
+            '            if env.type != "Finalize":\n'
+            '                raise ChallengeError(400, "expected Finalize")\n'
+            "            envelope_v2.Intake("
+        ),
+        "new": "            envelope_v2.Intake(",
+        "tests": [S21_UNSIGNED],
+        "why": "a miner's signed envelope of another type reaches the gate of a finalize.",
     },
     {
         "id": "exp-finalize-pins-its-gate-at-entry",

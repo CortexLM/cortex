@@ -29,6 +29,10 @@ NO_TAPE = (
 )
 WIDE_ROUND = G + "test_a_round_wider_than_one_lease_is_refused_at_opening_or_stays_auditable"
 SURVIVORS = G + "test_the_survivors_of_a_round_with_an_exhausted_member_are_paid_their_whole_round"
+NONCE_ONCE = (
+    "tests/ledger_invariants/test_finality_2.py::"
+    "test_a_round_is_credited_once_however_often_its_finalize_is_sent"
+)
 # Pinned by the tests of the base (PIN_EXISTING): the lot keeps no copy of them.
 BASE_POISON = (
     "tests/challenge/test_audit_liveness_v2.py::"
@@ -87,6 +91,9 @@ def replay_fact(name: str, field: str, why: str) -> dict[str, object]:
 
 
 MUTANTS = [
+    # ADR 0017 T1: the entry transaction of finalize_v2 refuses the wrong signer first (its own
+    # mutant is exp-finalize-gate-before-its-authentication), so SIGNER_GATE is held by two guards
+    # (README); this mutant is killed by the half only the settling guard holds, the reservation.
     mutant(
         "gf-finalize-has-no-signer-gate",
         ["FIN-01"],
@@ -94,7 +101,7 @@ MUTANTS = [
         '            model = self._authenticated_v2(run_id, raw, "Finalize", '
         "manifest.training.coord_pubkey)\n",
         "            model = Finalize.model_validate(envelope_v2.parse_envelope(raw).body)\n",
-        [SIGNER_GATE],
+        [SIGNER_GATE, NONCE_ONCE],
         "A Finalize of a miner or an auditor is read like the coordinator's until a later lookup "
         "fails, and the single-use reservation of its signed operation is never taken.",
     ),

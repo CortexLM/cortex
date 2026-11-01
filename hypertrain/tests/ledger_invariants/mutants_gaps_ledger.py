@@ -26,6 +26,10 @@ SCRUB_WORKS = G + "test_the_scrub_removes_every_name_the_service_reads_and_leave
 POLLUTED = G + "test_a_service_the_lot_builds_ignores_a_polluted_environment"
 RERUN_KEPT = G + "test_a_rerun_that_is_not_the_auditors_root_keeps_the_forfeit_and_the_blacklist"
 RERUN_COPIED = G + "test_a_rerun_claim_copied_from_the_published_verdict_does_not_clear_a_mismatch"
+NONCE_ONCE = (
+    "tests/ledger_invariants/test_finality_2.py::"
+    "test_a_round_is_credited_once_however_often_its_finalize_is_sent"
+)
 LATER_BEACON = G + (
     "test_an_identical_finalize_at_a_later_beacon_returns_the_stored_answer_and_changes_nothing"
 )
@@ -149,9 +153,12 @@ MUTANTS: list[dict[str, Any]] = [
                 return dict(json.loads(stored[0]))
 """
         + AUTHENTICATE_FINALIZE,
-        "tests": [EXPIRED_ENVELOPE],
+        # ADR 0017 T1: the entry transaction refuses the expired envelope first (two guards, see
+        # the README); the nonce check of the settling one is what this mutant still skips.
+        "tests": [EXPIRED_ENVELOPE, NONCE_ONCE],
         "why": "The stored result is returned before the Finalize is authenticated, so an "
-        "envelope whose expiry has passed is answered like a live one.",
+        "envelope whose expiry has passed, or a Finalize with other content, is answered like "
+        "the one that settled.",
     },
     # --- GAP-03: the vesting span the store hands the ledger -----------------------------------
     {

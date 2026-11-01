@@ -10888,6 +10888,14 @@ class ChallengeStore:
             # A run behind a service boundary meets _service_boundary_v2(heavy=True) below, which
             # refuses its finalize before any gate, as it always did: it is not gated here either.
             boundary = self._service_boundary_v2(run_id, w)
+            # Authenticated first, as _authenticated_v2 does below, but nothing is reserved: the
+            # transaction that settles reserves the nonce and drops it with any refusal of its own.
+            env = envelope_v2.parse_envelope(raw)
+            if env.type != "Finalize":
+                raise ChallengeError(400, "expected Finalize")
+            envelope_v2.Intake(run_id, {"Finalize": manifest.training.coord_pubkey.__eq__}).accept(
+                raw, self._now(self._db)
+            )
             if (
                 boundary is None
                 and not self._db.execute(
@@ -10909,7 +10917,7 @@ class ChallengeStore:
                 finally:
                     self._db.execute("ROLLBACK TO finalize_gate")
                     self._db.execute("RELEASE finalize_gate")
-                if now > envelope_v2.parse_envelope(raw).exp_drand:
+                if now > env.exp_drand:
                     raise ExpiredError("envelope expired")  # at the round the gate judges
         self._prime_finality_replay_v2(run_id, w, raw)
         with self._tx():
