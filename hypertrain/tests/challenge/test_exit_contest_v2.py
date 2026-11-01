@@ -266,10 +266,10 @@ def test_a_hold_is_dropped_at_the_dispute_bound_and_nobody_is_sanctioned(case, m
 def test_a_signed_first_window_moves_the_dispute_bound_of_a_held_no_show(monkeypatch, request):
     """ADR 0018 (Lens m-1): `_contest_hold_v2` builds its schedule with the signed first window. The
     hold ends at the dispute bound, the end of the re-audit window after the second audit window a
-    rearm opens at the end of the first: d_audit + F + 2 x lease + reaudit + 1, 200 rounds later
-    with F = 400 than with two leases."""
+    rearm opens at the end of the first: d_audit + F + 2 x lease + reaudit + 1, 100 rounds later
+    with F = 300 than with two leases (and not the gap cap of 400)."""
     monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
-    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 400)
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 300)
     case = Round(request.getfixturevalue("six_network"), monkeypatch)
     case.contest()
     monkeypatch.setattr(ChallengeStore, "_close_blocked_disputes_v2", lambda *a, **k: None)
@@ -277,10 +277,10 @@ def test_a_signed_first_window_moves_the_dispute_bound_of_a_held_no_show(monkeyp
     d_audit = case.opening.d_audit
     push_through(case.n, d_audit + 4 * 100 + 100 + 1)  # the bound of an unsigned window
     assert case.row()["state"] == "PENDING"
-    push_through(case.n, d_audit + 400 + 2 * 100 + 100)
+    push_through(case.n, d_audit + 300 + 2 * 100 + 100)
     assert case.row()["state"] == "PENDING"
 
-    push_through(case.n, d_audit + 400 + 2 * 100 + 100 + 1)
+    push_through(case.n, d_audit + 300 + 2 * 100 + 100 + 1)
 
     row = case.row()
     assert (row["state"], row["blame"]) == ("WAIVED", "INFRASTRUCTURE")

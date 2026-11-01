@@ -910,6 +910,35 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         (HOLD_RELAY,),
     ),
     (
+        "the retirement gate takes the gap cap for the first window",
+        STORE,
+        "            if now < min(body.d_final, body.d_audit + audit.first_window()) - 1:\n",
+        "            if now < min(body.d_final, body.d_audit + audit.gap_cap()) - 1:\n",
+        (RETIRE_GATE + "[missed]",),
+    ),
+    (
+        "the reaper gives the planner the gap cap as the first window",
+        STORE,
+        "                    first_window_rounds=audit.first_window(),\n                ),\n",
+        "                    first_window_rounds=audit.gap_cap(),\n                ),\n",
+        (REAPER_RELAY,),
+    ),
+    (
+        "the reaper gives the planner the round's gap as the first window",
+        STORE,
+        "                    first_window_rounds=audit.first_window(),\n                ),\n",
+        "                    first_window_rounds=body.d_final - body.d_audit,\n"
+        "                ),\n",
+        (REAPER_RELAY,),
+    ),
+    (
+        "the contest hold gives the planner the gap cap as the first window",
+        STORE,
+        "            first_window_rounds=audit.first_window(),\n        )\n",
+        "            first_window_rounds=audit.gap_cap(),\n        )\n",
+        (HOLD_RELAY,),
+    ),
+    (
         "the planner's first window stays two leases",
         EXIT,
         "        return min(self.d_final, self.d_audit + self.first_window_rounds)\n",
