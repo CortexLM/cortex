@@ -5275,8 +5275,12 @@ class ChallengeStore:
             or units < 1
         ):
             raise ChallengeError(422, "SERVICE_CHARGE_BOUNDS")
-        if self._db.in_transaction:
-            raise ChallengeError(409, "SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION")
+        # Read under the lock: a transaction another thread holds has ended once it is taken,
+        # so only the caller's own is refused. `_tx` takes it again, outermost unless the
+        # caller holds it, so the rounds staged meanwhile are written before the deadline check.
+        with self._lock:
+            if self._db.in_transaction:
+                raise ChallengeError(409, "SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION")
         with self._tx():
             preparation = operation == "genesis" and w == -1
             reservation = (

@@ -17,10 +17,13 @@ that raises with the transaction open (N1), whose fix also flips the strict xfai
 of test_finality.py, and a v1 journal replay that must equal an unfailed answer. L10 is equivalent
 on every store the code can build (one run per store, one run per escrow ledger): its pin writes a
 second run by hand. The charge window of `_service_charge_v2` (a 409 while another thread holds a
-transaction of the store) is a strict xfail of tests/challenge/test_service_charge_window_v2.py:
-its fix is an owned body (hash train). Removing the guard would close that window too (the charge
-then waits on the lock in `_tx`); the mutant here pins what the guard still adds, the mapped 409
-for a charge inside its caller's own transaction.
+transaction of the store) was a strict xfail of tests/challenge/test_service_charge_window_v2.py;
+ADR 0017 T2 reads the guard under the store lock (an owned body: the hash moves). One mutant per
+window test reads it without the lock again. Another patch holds the lock across the charge's
+`_tx`, the wrap the ADR first proposed: that `_tx` is then not outermost and writes no staged
+round, which the forwarded-push and staged-deadline tests each kill (one mutant per test). The
+guard mutant pins what the guard still adds, the mapped 409 for a charge inside its caller's own
+transaction.
 
 What no test or mutant covers: the order in which the store locks are taken. Every path that holds
 two of them takes the root first and the children in load order (read in review, not pinned), and
@@ -56,9 +59,21 @@ NOTHING_TO_PAY = HOSTED + "test_a_run_with_nothing_to_pay_is_not_built_by_the_we
 JOURNAL_REPLAY = (
     HOSTED + "test_the_retry_of_a_journaled_epoch_is_the_answer_of_a_call_that_never_failed"
 )
-OWN_TRANSACTION = (
-    "tests/challenge/test_service_charge_window_v2.py::"
-    "test_a_charge_made_inside_its_own_open_transaction_is_still_refused"
+WINDOW = "tests/challenge/test_service_charge_window_v2.py::"
+OWN_TRANSACTION = WINDOW + "test_a_charge_made_inside_its_own_open_transaction_is_still_refused"
+WEIGHTS_WINDOW = (
+    WINDOW + "test_a_charge_in_the_weights_answer_window_of_its_store_waits_and_is_granted"
+)
+GENESIS_PUSH = (
+    WINDOW + "test_a_genesis_charge_during_a_beacon_push_of_its_store_waits_and_is_granted"
+)
+FORWARDED_PUSH = (
+    WINDOW
+    + "test_a_charge_during_a_forwarded_push_waits_and_the_round_forwarded_meanwhile_is_written"
+)
+STAGED_DEADLINE = (
+    WINDOW
+    + "test_a_charge_behind_a_lock_holder_checks_its_deadline_with_the_round_staged_meanwhile"
 )
 UNRETRIED = (
     "tests/ledger_invariants/test_weights_2.py::"
@@ -76,6 +91,19 @@ ASK_CHILDREN = (
 ASK_CHILDREN_ALONE = (
     "                c.weights(epoch, epoch_at, computed_at)\n"
     "                for c in self._children.values()\n"
+)
+CHARGE_GUARD = (
+    "            if self._db.in_transaction:\n"
+    '                raise ChallengeError(409, "SERVICE_CHARGE_'
+    'REQUIRES_COMMITTED_TRANSACTION")\n'
+)
+CHARGE_GUARD_UNLOCKED = (
+    "        if self._db.in_transaction:\n"
+    '            raise ChallengeError(409, "SERVICE_CHARGE_'
+    'REQUIRES_COMMITTED_TRANSACTION")\n'
+)
+CHARGE_TX = (
+    '        with self._tx():\n            preparation = operation == "genesis" and w == -1\n'
 )
 
 MUTANTS = [
@@ -205,16 +233,55 @@ MUTANTS = [
         "id": "d109-charge-inside-its-own-transaction-allowed",
         "invariants": ["WGT-15"],
         "path": STORE,
-        "old": (
-            "        if self._db.in_transaction:\n"
-            '            raise ChallengeError(409, "SERVICE_CHARGE_'
-            'REQUIRES_COMMITTED_TRANSACTION")\n'
-        ),
-        "new": "",
+        "old": CHARGE_GUARD,
+        "new": "            pass\n",
         "tests": [OWN_TRANSACTION],
         "why": "a service charge made inside its caller's own transaction is no longer refused "
         "with the mapped 409: the nested BEGIN raises a bare sqlite error instead.",
     },
+    *(
+        {
+            "id": f"d109-charge-guard-read-without-the-lock-{pin}",
+            "invariants": ["WGT-15"],
+            "path": STORE,
+            "old": "        with self._lock:\n" + CHARGE_GUARD,
+            "new": CHARGE_GUARD_UNLOCKED,
+            "tests": [test],
+            "why": "the charge reads in_transaction without the lock again: a transaction another "
+            "thread holds on the store refuses it with 409 and burns its attempt 1.",
+        }
+        for pin, test in (
+            ("weights", WEIGHTS_WINDOW),
+            ("genesis-push", GENESIS_PUSH),
+            ("forwarded-push", FORWARDED_PUSH),
+            ("staged-deadline", STAGED_DEADLINE),
+        )
+    ),
+    *(
+        {
+            "id": f"d109-charge-holds-the-lock-across-its-tx-{pin}",
+            "invariants": ["WGT-15"],
+            "path": STORE,
+            "old": CHARGE_TX,
+            "new": CHARGE_TX.replace("with self._tx()", "with self._lock, self._tx()"),
+            "tests": [test],
+            "why": why,
+        }
+        for pin, test, why in (
+            (
+                "keeps-staged-rounds",
+                FORWARDED_PUSH,
+                "the charge's `_tx` is not outermost: a round forwarded during the charge stays "
+                "staged after it, where an outermost transaction writes it.",
+            ),
+            (
+                "misses-the-deadline",
+                STAGED_DEADLINE,
+                "the charge's `_tx` is not outermost: its deadline check reads the view without "
+                "the round staged behind a lock holder and grants a charge past its deadline.",
+            ),
+        )
+    ),
     {
         "id": "d109-failed-commit-left-open",
         "invariants": ["WGT-15", "FIN-25"],

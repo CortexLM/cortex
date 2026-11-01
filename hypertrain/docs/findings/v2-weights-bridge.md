@@ -37,11 +37,13 @@ the transaction that writes `weights_runs`; the weight goes to the origin's hotk
   rolls back, even when SQLite kept the transaction open (`_tx`), so it can answer that repeat.
   A hosted store stays in its answer transaction until the root commits. A service charge
   (`_service_charge_v2`) on a store while another thread holds a transaction of it, that window or
-  any other (a beacon push), answers 409 `SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION` and burns
-  attempt 1. The server's outer charge is behind the heavy gate (503 first); the genesis charge of
-  the operator continuation (`scripts/network_service_proof.py`) runs beside the pusher on the store
-  it serves. The fix is in an owned body (hash train F14, ADR 0017 finding 5), pinned by two
-  strict xfails in `tests/challenge/test_service_charge_window_v2.py`.
+  any other (a beacon push), waits for it: the charge reads its guard under the store lock, so only
+  a charge inside its caller's own transaction answers 409
+  `SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION`. Until ADR 0017 T2 (hash train F14, finding 5)
+  it read the guard without the lock and such a charge was refused and burned attempt 1. The
+  server's outer charge is behind the heavy gate (503 first); the genesis charge of the operator
+  continuation (`scripts/network_service_proof.py`) runs beside the pusher on the store it serves.
+  Pinned by `tests/challenge/test_service_charge_window_v2.py`.
 - A hosted run whose stored manifest the model now refuses (`RunRetired`, 409
   `RUN_MANIFEST_RETIRED`, e.g. a manifest without the env pin) is left out of the escrows its store
   pays: its units stay `available`. Such a run is not expected to be served again (ADR 0011: a run
