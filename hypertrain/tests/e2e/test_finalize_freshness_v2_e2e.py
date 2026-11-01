@@ -46,17 +46,19 @@ def aggregate(network):
     return network.client.post(network.url + "/admin/rounds/0/aggregate", headers=fixtures.admin())
 
 
-def finalize_round(network, w: int, applied, expiry: int = 100000):
+def finalize_round(network, w: int, applied, expiry: int = 100000, *, key=None, forged=False):
+    """Round w's Finalize, signed by the coordinator or by `key`; `forged` breaks its signature."""
     final = Finalize(
         w=w,
         final_theta_hash_w1=applied["theta_hash"],
         included=sorted(k.ss58 for k in fixtures.HOT),
         entitlements_root="0" * 64,
     )
+    envelope = type(network).signed(network, key or fixtures.COORD, "Finalize", final, expiry)
+    if forged:
+        envelope["sig"] = f"{int(envelope['sig'][0], 16) ^ 1:x}" + envelope["sig"][1:]
     return network.client.post(
-        network.url + f"/admin/rounds/{w}/finalize",
-        json=type(network).signed(network, fixtures.COORD, "Finalize", final, expiry),
-        headers=fixtures.admin(),
+        network.url + f"/admin/rounds/{w}/finalize", json=envelope, headers=fixtures.admin()
     )
 
 
@@ -159,6 +161,63 @@ def test_a_finalize_refused_at_entry_replays_nothing(audited, monkeypatch):
     expired = finalize(network, applied, expiry=view + 4)
     assert (expired.status_code, expired.json()["detail"]) == (409, "envelope expired")
     assert replays == [] and record(network, "finalize") is None
+
+
+def written(network) -> tuple[int, int, str | None]:
+    """What a finalize of round 0 leaves: its gate's pins, the accepted operations, its record."""
+    db = network.store._db
+    pins = db.execute(
+        "SELECT COUNT(*) FROM beacon_pins_v2 WHERE operation_id LIKE ?", ("finalize:0:%",)
+    ).fetchone()[0]
+    return (
+        pins,
+        db.execute("SELECT COUNT(*) FROM accepted_v2").fetchone()[0],
+        record(network, "finalize"),
+    )
+
+
+def test_an_unauthenticated_finalize_is_refused_before_its_gate_and_writes_nothing(
+    audited, monkeypatch
+):
+    # Lens m2 on c9e612b3: the gate and the Finalize's expiry were judged before the Finalize was
+    # authenticated, so a Finalize nobody signed got the gate's 503 or the expiry's 409. On this
+    # route the bearer is the admin's; the Finalize's own signature and signer are refused 409
+    # (the store maps SignatureError to 401).
+    network = audited
+    view = network.now
+    applied = aggregated(network, view)
+    replays = slow_replays(network, monkeypatch, to=view + 2 * CAP)
+    before = written(network)
+    answers = []
+
+    def answered(response) -> None:
+        answers.append((response.status_code, response.json()["detail"]))
+
+    # On a view past the cap: a forged signature, a body that is no envelope, and another type
+    # of envelope, signed by a miner.
+    wall_at(network, view + CAP + 1)
+    answered(finalize_round(network, 0, applied, forged=True))
+    for body in ({}, network.signed(fixtures.HOT[0], "BondRequest", {"admission_id": "0" * 64})):
+        answered(
+            network.client.post(
+                network.url + "/admin/rounds/0/finalize", json=body, headers=fixtures.admin()
+            )
+        )
+    # Signed by a key that is not the coordinator's, and expired at the round the gate would
+    # judge though not at the stale view.
+    wall_at(network, view + 10)
+    answered(finalize_round(network, 0, applied, view + 4, key=fixtures.HOT[0]))
+    # On a fresh view, a forged signature again.
+    wall_at(network, view)
+    answered(finalize_round(network, 0, applied, forged=True))
+    assert answers == [
+        (409, "sr25519 signature does not verify"),
+        (409, "invalid versioned envelope"),
+        (400, "expected Finalize"),
+        (409, "signer is not authorized for message role"),
+        (409, "sr25519 signature does not verify"),
+    ]
+    assert replays == [] and written(network) == before
 
 
 @pytest.mark.xfail(
