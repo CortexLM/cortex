@@ -230,6 +230,10 @@ def test_a_beacon_round_is_accepted_while_a_finalize_replays_the_tape(
     assert latest.error is None
     assert settling.error is None, f"the finalize failed: {settling.error!r}"
     assert settling.result["status"] == "SETTLED"
+    # Closed at the view its replay ended at, the round pushed meanwhile, not at the round it
+    # entered at (ADR 0017 T1, D157).
+    closure = store._record_v2(restored.run, "replayed-finality", "0")
+    assert closure["finalized_beacon"] == number, f"entered at {number - 1}"
 
 
 def test_the_store_lock_is_held_for_less_than_a_second_by_a_finalize_that_replays_for_longer(

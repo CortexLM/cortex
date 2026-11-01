@@ -179,7 +179,7 @@ def test_a_finalize_whose_own_replay_outlasts_the_cap_settles(audited, monkeypat
     assert settled.status_code == 200, settled.text  # today: 503 "beacon infrastructure paused"
 
 
-def test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_its_entry_round(
+def test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_the_round_it_ends(
     audited, monkeypatch
 ):
     # S21 round 0, attempt 2: a fresh view at entry, then a replay long enough that the view ends
@@ -192,16 +192,19 @@ def test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_its_entry_round
     applied = execute_round(network, 1)
     view = network.now
     network.store._finality_verdicts_v2.clear()  # no verdict kept by an earlier test: it replays
-    replays = slow_replays(network, monkeypatch, to=view + CAP + 10)
+    replay_ends = view + CAP + 10  # the replay spans 62 rounds; nothing is pushed meanwhile
+    replays = slow_replays(network, monkeypatch, to=replay_ends)
     paid = released(network)
     settled = finalize_round(network, 1, applied)
     assert settled.status_code == 200, settled.text
     assert settled.json()["status"] == "SETTLED"
     assert replays == [1]
-    # Settled at the round the gate judged on entry.
-    vesting = view + network.manifest.training.verify.E_vest_rounds
+    # Closed and vested from the round the replay ended at, as a healthy view held it then: not
+    # from the round the gate judged on entry, the replay's duration earlier (Lens m1, D157).
+    closed = replay_ends - MAX_LAG_ROUNDS
+    vesting = closed + network.manifest.training.verify.E_vest_rounds
     finalized, releases = settled_at(network, 1)
-    assert (finalized, releases - paid) == (view, {vesting})
+    assert (finalized, releases - paid) == (closed, {vesting}), f"entry round {view}"
     # Retried during a long outage: the stored answer, as before, without the gate.
     wall_at(network, view + 10 * CAP)
     assert finalize_round(network, 1, applied).json() == settled.json()

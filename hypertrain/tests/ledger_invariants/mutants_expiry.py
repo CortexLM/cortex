@@ -41,7 +41,7 @@ S21 = "tests/e2e/test_finalize_freshness_v2_e2e.py::"
 S21_AGGREGATE = S21 + "test_s21_an_aggregate_retried_on_a_flicker_answers_its_stored_tape"
 # Branch hotfix-finalize-entry-gate: the finalize's gate judged once, before its replay.
 S21_ENTRY = S21 + "test_a_finalize_refused_at_entry_replays_nothing"
-S21_REPLAY = S21 + "test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_its_entry_round"
+S21_REPLAY = S21 + "test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_the_round_it_ends"
 # ADR 0017 T1, FIN-04: the entry gate's pin is written with the round, never alone.
 ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
 PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
