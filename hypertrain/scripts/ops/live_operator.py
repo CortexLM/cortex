@@ -190,6 +190,20 @@ def check_reaudit_gap(audit: AuditPolicyV2, gap: int) -> None:
         )
 
 
+def check_first_window_gap(audit: AuditPolicyV2, gap: int) -> None:
+    """A policy that pins `first_window_rounds` is sized for the audits its publisher planned to
+    run from `d_audit`. Refuse a narrower gap: its first audit window would end at `d_final`,
+    before those audits, with no rearm after it (ADR 0018 Part 2.4, open question 5). A gap of
+    exactly the window opens, with no rearm room either: the runbook asks for the window plus the
+    wanted room. A policy that pins nothing is not asked."""
+    if audit.first_window_rounds is not None and gap < audit.first_window_rounds:
+        raise SystemExit(
+            f"gap {gap} (d_final-d_audit) is shorter than first_window_rounds "
+            f"{audit.first_window_rounds} of the audit policy: the first audit window would end "
+            "at d_final, before the audits it is sized for, with no rearm after it"
+        )
+
+
 def previous_final_hash(m: Master, w: int) -> str:
     """What the opening of round w + 1 chains to: the finalize of round w, or the evidence of
     its retirement when the round reached no tape (ADR 0011 Part 8, decision 11)."""
@@ -213,6 +227,7 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     check_gap_cap(audit, economics.ledger_mode)
     check_open_shape(w, hotkeys, offsets, audit.gap_cap())
     check_reaudit_gap(audit, offsets[5] - offsets[3])
+    check_first_window_gap(audit, offsets[5] - offsets[3])
     cfg = TrainConfig.from_manifest_v2(manifest)
     now = m.call("GET", "")["now_round"]
     d = [now + o for o in offsets]
