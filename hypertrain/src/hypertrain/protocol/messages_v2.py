@@ -811,7 +811,8 @@ class AuditPolicyV2(WireModel):
             raise ValueError("audit re-audit window must be between one and two leases")
         # `d_final` is the bound of the wait for a member's standing (`Wait.MEMBER_STATE`, Part 8):
         # it must not lie past the last audit wait (`4 * lease_rounds` and the re-audit window), the
-        # latest bound the exit table has.
+        # latest bound the exit table has with a first window of two leases; a signed one only moves
+        # that wait later (`exit_v2.Schedule.audits_end`), so the rule still holds.
         if self.gap_cap() > 2 * self.absolute_rounds() + self.reaudit_window():
             raise ValueError("audit gap cap must not pass the end of the last audit wait")
         if self.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode not in (None, "test"):
