@@ -76,6 +76,27 @@
 # before bc306dc refuses them (extra_forbidden): a knobbed run needs its server image and the GPU
 # image of its miners and references built from bc306dc or later (GPU cb52fe37 is not); the dry
 # run says so in artifact_limits.requires. implementation_hash does not tell those images apart.
+# HT_D20_AUDITORS=N (every geometry, optional, default 2; ADR 0018): seeds auditor-0..auditor-N-1
+# (2..9) and lists them all in training.auditors, the auditors that may serve. Another N moves the
+# training, and with it the run id: a warm-up of the same run lists the same auditors (its seeds
+# are copied with the others).
+# HT_D20_AUDIT_LANES=L (every geometry, optional; ADR 0018): the audit policy signs
+# max_running_jobs = L (1..9) instead of 2, the audit leases that may run at once. L above
+# HT_D20_AUDITORS is refused by the first stage (one live lease per auditor: a lane nobody could
+# hold). Each lane needs an auditor container that polls and an executor host (one audit per host):
+# neither is in the manifest, and the dry run says so in audit_lanes.requires.
+# HT_D20_AUDIT_CYCLE_SECONDS=S, HT_D20_AUDIT_ROSTER=A and HT_D20_AUDIT_HOSTS=K (dense-0.1b,
+# dense-0.05b and dense-0.03b only, optional, the three together; ADR 0018 Part 2.4): the audit
+# policy signs first_window_rounds = first_window_rounds_for(A, P, S, 100), the first audit window
+# of a round of A audits run in waves of P = min(lanes, auditors, K) at once. S is the MEASURED
+# largest lease-to-complete of one audit of that model at P lanes on as many hosts, in whole
+# seconds, never an estimate: it enters the run id. A window above the policy's gap cap is refused
+# by the first stage (raise it with HT_D20_AUDIT_GAP_ROUNDS); the dry run recomputes the window
+# and prints it. Without the variables nothing changes: same policies, manifest and run id. The
+# ledger of these runs is test, the only one that may sign lanes other than 2 or a first window. A
+# run that signs either can only be created and served by a server image that holds ADR 0018: older
+# code refuses its audit policy (literal_error, extra_forbidden); the auditor, miner and GPU images
+# never parse the policy and need nothing. The dry run says so in audit_lanes.requires.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
@@ -156,10 +177,24 @@ WARMUP=${HT_D20_WARMUP_OUT:-}
 GAP=${HT_D20_AUDIT_GAP_ROUNDS:-}
 REFS=${HT_D20_MAX_REFS:-}
 PARTS=${HT_D20_MAX_PARTS:-}
+AUDITORS=${HT_D20_AUDITORS:-2}
+LANES=${HT_D20_AUDIT_LANES:-}
+CYCLE=${HT_D20_AUDIT_CYCLE_SECONDS:-}
+ROSTER=${HT_D20_AUDIT_ROSTER:-}
+HOSTS=${HT_D20_AUDIT_HOSTS:-}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $GEOMETRY in dense-1b|dense-0.1b|dense-0.05b|dense-0.03b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b, dense-0.05b, dense-0.03b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
+case $AUDITORS in [2-9]) ;; *) echo "HT_D20_AUDITORS must be 2..9" >&2; exit 2 ;; esac
+case $LANES in ''|[1-9]) ;; *) echo "HT_D20_AUDIT_LANES must be 1..9" >&2; exit 2 ;; esac
+for knob in HT_D20_AUDIT_CYCLE_SECONDS HT_D20_AUDIT_ROSTER HT_D20_AUDIT_HOSTS; do
+    value=${!knob:-}
+    [ -z "$value" ] || [[ $value =~ ^[1-9][0-9]*$ ]] || { echo "$knob must be a whole number from 1 (digits, no sign or leading zero)" >&2; exit 2; }
+done
+if [ -n "$CYCLE$ROSTER$HOSTS" ] && { [ -z "$CYCLE" ] || [ -z "$ROSTER" ] || [ -z "$HOSTS" ]; }; then
+    echo "HT_D20_AUDIT_CYCLE_SECONDS, HT_D20_AUDIT_ROSTER and HT_D20_AUDIT_HOSTS go together: the first window needs all three" >&2; exit 2
+fi
 if [[ $GEOMETRY == dense-0.1b || $GEOMETRY == dense-0.05b || $GEOMETRY == dense-0.03b ]]; then
     [[ $REPLAY =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_REPLAY_SECONDS: $GEOMETRY has no default; give the measured warm audit replay in whole seconds (max of >= 3 warm replays on the auditing B300)" >&2; exit 2; }
     if [ -n "$WARMUP" ]; then
@@ -173,6 +208,8 @@ elif [ -n "$WARMUP" ]; then
     echo "HT_D20_WARMUP_OUT is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
 elif [ -n "$GAP" ]; then
     echo "HT_D20_AUDIT_GAP_ROUNDS is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
+elif [ -n "$CYCLE" ]; then
+    echo "HT_D20_AUDIT_CYCLE_SECONDS, HT_D20_AUDIT_ROSTER and HT_D20_AUDIT_HOSTS are read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
 fi
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
@@ -235,7 +272,7 @@ mkdir "$OUT/inputs"
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
     "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" "$GAP" \
-    "$REFS" "$PARTS" <<'PY'
+    "$REFS" "$PARTS" "$AUDITORS" "$LANES" "$CYCLE" "$ROSTER" "$HOSTS" <<'PY'
 import json
 import math
 import os
@@ -256,12 +293,14 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages import drand_round_at
 from hypertrain.protocol.messages_v2 import (
-    DEFAULT_GAP_CAP_ROUNDS, MAX_ARTIFACT_REFS, MAX_PARTS, reaudit_rounds_for,
+    DEFAULT_GAP_CAP_ROUNDS, MAX_ARTIFACT_REFS, MAX_PARTS, first_window_rounds_for,
+    reaudit_rounds_for,
 )
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 (image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
- attention, ht_root, replay, gap, max_refs, max_parts) = sys.argv[1:]
+ attention, ht_root, replay, gap, max_refs, max_parts, auditors, lanes, cycle, roster,
+ hosts) = sys.argv[1:]
 # The dense TEST models whose audit window comes from a measured replay (ADR 0015, ADR 0016).
 MEASURED = ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 # The pin first: a count or a backend no GPU class was measured with stops the build before
@@ -283,10 +322,17 @@ for knob, value, bound in (
 ):
     if value and int(value) > bound:
         sys.exit(f"{knob}={value} is above {bound}, the protocol bound of ArtifactLimits")
+# ADR 0018: one live lease per auditor, so a lane beyond the listed auditors is one nobody holds.
+if lanes and int(lanes) > int(auditors):
+    sys.exit(
+        f"HT_D20_AUDIT_LANES={lanes} is above HT_D20_AUDITORS={auditors}: one live lease per "
+        "auditor, so a lane beyond the listed auditors never runs"
+    )
 out_dir = Path(out)
 secret_dir, inputs = out_dir / "secrets", out_dir / "inputs"
 COLD = tuple(f"cold-{i}" for i in range(int(coldkeys)))
-ROLES = ("owner", "coord", "auditor-0", "auditor-1", "referee", *COLD)
+AUDITORS = tuple(f"auditor-{i}" for i in range(int(auditors)))
+ROLES = ("owner", "coord", *AUDITORS, "referee", *COLD)
 ss58 = {}
 for role in ROLES:
     path = secret_dir / f"{role}.seed"
@@ -429,7 +475,7 @@ else:
 )
 (inputs / "reference-spec.json").write_bytes(reference)
 body["coord_pubkey"] = ss58["coord"]
-body["auditors"] = [ss58["auditor-0"], ss58["auditor-1"]]
+body["auditors"] = [ss58[a] for a in AUDITORS]
 body["reference_spec"].update(
     image_digest=image,
     driver_allowlist=[driver],
@@ -503,6 +549,20 @@ if geometry in MEASURED:
         audit["gap_cap_rounds"] = int(gap)
     elif needed > DEFAULT_GAP_CAP_ROUNDS:
         audit["gap_cap_rounds"] = needed
+# ADR 0018: the lanes and the first window, signed only when their knobs are set.
+if lanes:
+    policies["audit"]["max_running_jobs"] = int(lanes)
+if cycle:
+    audit = policies["audit"]
+    parallel = min(audit["max_running_jobs"], int(auditors), int(hosts))
+    window = first_window_rounds_for(int(roster), parallel, int(cycle), audit["lease_rounds"])
+    cap = audit.get("gap_cap_rounds", DEFAULT_GAP_CAP_ROUNDS)
+    if window > cap:
+        sys.exit(
+            f"the first window of {roster} audits on {parallel} lanes at {cycle} s is {window} "
+            f"rounds, above the gap cap of {cap}: raise HT_D20_AUDIT_GAP_ROUNDS to at least {window}"
+        )
+    audit["first_window_rounds"] = window
 # Absent, a bound is not written, so the policy, its digest and the run id are the ones without it.
 if max_refs:
     policies["admission"]["artifact_limits"]["max_refs"] = int(max_refs)
@@ -540,7 +600,8 @@ if [ -n "$WARMUP" ] && cmp -s "$OUT/out/manifest.json" "$WARMUP/out/manifest.jso
 fi
 
 uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" \
-    "$REPLAY" "$WARMUP" "$GAP" "$REFS" "$PARTS" <<'PY'
+    "$REPLAY" "$WARMUP" "$GAP" "$REFS" "$PARTS" "$AUDITORS" "$LANES" "$CYCLE" "$ROSTER" "$HOSTS" \
+    <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -553,7 +614,7 @@ from hypertrain.protocol.env_pins import GPU_CLASSES
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages_v2 import (
     DEFAULT_GAP_CAP_ROUNDS, AdmissionPolicyV2, AggregationPolicyV2, AuditPolicyV2, DisputePolicyV2,
-    EconomicsPolicyV2, RunManifestV2, reaudit_rounds_for,
+    EconomicsPolicyV2, RunManifestV2, first_window_rounds_for, reaudit_rounds_for,
 )
 from hypertrain.protocol.relay_messages import RelayRegistryV1
 
@@ -562,6 +623,7 @@ n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
 measured = sys.argv[5] in ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 attention, replay, warmup, gap = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
 refs, parts = sys.argv[10], sys.argv[11]
+auditors, lanes, cycle, roster, hosts = int(sys.argv[12]), *sys.argv[13:17]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
     (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
@@ -613,6 +675,15 @@ if measured:
     )
 else:
     checks["no_reaudit_window_or_cap"] = audit.reaudit_rounds is None and audit.gap_cap_rounds is None
+# ADR 0018: the lanes the knob asked for (2 without it), and the first window of the measured
+# cycle (none without it), recomputed from the knobs as the first stage computed it.
+parallel = min(audit.max_running_jobs, auditors, int(hosts)) if cycle else None
+first_window = (
+    first_window_rounds_for(int(roster), parallel, int(cycle), audit.lease_rounds)
+    if parallel else None
+)
+checks["audit_lanes_of_the_knob"] = audit.max_running_jobs == (int(lanes) if lanes else 2)
+checks["first_window_of_the_cycle"] = audit.first_window_rounds == first_window
 # The two builds of the runbook: the warm-up at the largest replay validate_training accepts (two
 # leases of window), the real one below the last replay whose window is still the warm-up's.
 window = lambda seconds: reaudit_rounds_for(seconds, audit.lease_rounds)  # noqa: E731
@@ -657,7 +728,7 @@ checks.update(
     relay=len(registry.specs) == 1 and spec.mode == "transport"
     and str(spec.https_url).rstrip("/") == "https://relay.joinbase.ai",
     coord_is_reward_authority=economics.reward_authority == t.coord_pubkey == keys["coord"],
-    two_auditors=len(set(t.auditors)) == 2,
+    listed_auditors=len(set(t.auditors)) == len(t.auditors) == auditors,
 )
 checks[f"pin_gpu_class_{gpu}"] = ref.env.pinned.gpu == gpu
 print(json.dumps({
@@ -674,6 +745,22 @@ print(json.dumps({
         "replay_seconds": int(replay) if replay else None,
         "warmup_replay_seconds": ceiling if measured else None,
         "stop_above_seconds": stop_above if measured else None,
+    },
+    "audit_lanes": {
+        "auditors": len(t.auditors),
+        "max_running_jobs": audit.max_running_jobs,
+        "first_window_rounds": audit.first_window_rounds,
+        "first_window": None if first_window is None else {
+            "audits": int(roster),
+            "parallel": parallel,
+            "cycle_seconds": int(cycle),
+            "gap_cap": audit.gap_cap(),
+        },
+        "requires": (
+            f"{audit.max_running_jobs} lanes: as many auditor containers that poll and as many "
+            "executor hosts (one audit per host); a server image that holds ADR 0018: older code "
+            "refuses this audit policy (literal_error, extra_forbidden)"
+        ) if audit.max_running_jobs != 2 or audit.first_window_rounds is not None else None,
     },
     "warmup_run_id": other.run_id() if warmup else None,
     "artifact_limits": {
