@@ -10870,6 +10870,7 @@ class ChallengeStore:
         }
 
     def finalize_v2(self, run_id: str, w: int, raw: bytes) -> dict[str, Any]:
+        from hypertrain.beacon.freshness import FreshnessGate
         from hypertrain.challenge.finality_v2 import RoundStatus, settle
         from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
@@ -10877,8 +10878,11 @@ class ChallengeStore:
         # The beacon gate is judged once, here, before the replay: a replay keeps the pusher out
         # for minutes, and a gate judged after it refused on the lag the call itself made (S21).
         # The round it passes at is the round the finalize settles at. A round already finalized
-        # is answered from its records, without the gate, as it always was.
+        # is answered from its records, without the gate, as it always was. The gate's pin is
+        # rolled back here and written with the round, so a finalize refused after its replay
+        # leaves nothing, as one transaction did (FIN-04).
         now: int | None = None
+        pins: list[tuple[Any, ...]] = []
         with self._tx():
             manifest = self._run_v2(run_id)
             self.require_roster_v2(run_id, w)
@@ -10886,7 +10890,20 @@ class ChallengeStore:
                 "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
                 (run_id, str(w)),
             ).fetchone():
-                now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")
+                operation = f"finalize:{w}:{self._now(self._db)}"
+                self._db.execute("SAVEPOINT finalize_gate")
+                try:
+                    now = self._fresh_v2(manifest, operation)
+                    pins = [
+                        tuple(row)
+                        for row in self._db.execute(
+                            "SELECT * FROM beacon_pins_v2 WHERE run_id=? AND operation_id=?",
+                            (manifest.run_id(), operation),
+                        )
+                    ]
+                finally:
+                    self._db.execute("ROLLBACK TO finalize_gate")
+                    self._db.execute("RELEASE finalize_gate")
                 if now > envelope_v2.parse_envelope(raw).exp_drand:
                     raise ExpiredError("envelope expired")  # at the round it settles at
         self._prime_finality_replay_v2(run_id, w, raw)
@@ -10927,6 +10944,8 @@ class ChallengeStore:
                     raise ChallengeError(409, "conflicting finalized origin authority")
                 return self._record_v2(run_id, "finalize-result", str(w))
             assert now is not None  # gated above: a finalize record is never removed
+            FreshnessGate(self._db, manifest.run_id())  # its table: a first gate's rollback took it
+            self._db.executemany("INSERT INTO beacon_pins_v2 VALUES(?,?,?,?,?,?,?)", pins)
             self.require_roster_v2(run_id, w)
             self._require_unretired_v2(run_id, w)
             applied = self._record_v2(run_id, "applied", str(w))
