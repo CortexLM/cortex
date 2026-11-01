@@ -119,7 +119,8 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-lease-store-cap-of-three",
         "invariants": ["A2W-02"],
         "path": STORE,
-        "old": ").fetchone()[0]\n                >= 2\n            ):\n                return None",
+        "old": ").fetchone()[0]\n                >= policy.max_running_jobs\n            ):\n"
+        "                return None",
         "new": ").fetchone()[0]\n                >= 3\n            ):\n                return None",
         "tests": [CAPS],
         "why": "three replays may run on the master at once.",

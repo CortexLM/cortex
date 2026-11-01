@@ -146,14 +146,16 @@ SERVICE_ACCEPTS = "tests/ops/test_manifest_v2.py::test_build_then_service_accept
 BUILD_REFUSES = "tests/ops/test_manifest_v2.py::test_build_refuses_invalid_inputs"
 MANIFEST_TOOL = "src/hypertrain/ops/manifest_v2.py"
 PRODUCTION_CAP = POLICY + "test_a_production_manifest_cannot_raise_the_gap_cap_above_the_default"
-BUILDER_CAP = (
+BUILDER_REFUSES_LIFT = (
     "tests/ops/test_manifest_v2.py::"
-    "test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap[production-2]"
+    "test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap[production-2-"
 )
-SERVICE_CAP = (
+BUILDER_CAP = BUILDER_REFUSES_LIFT + "gap-cap]"
+SERVICE_REFUSES_LIFT = (
     "tests/ops/test_manifest_v2.py::"
-    "test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap"
+    "test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap["
 )
+SERVICE_CAP = SERVICE_REFUSES_LIFT + "gap-cap]"
 FAIL_REAUDIT = (
     "            self._fail_reaudit_v2(run_id, row)  "
     "# the second auditor failed too: the member leaves\n"
@@ -167,6 +169,57 @@ REAUDIT_FIELD = (
     "    reaudit_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(\n"
     "        default=None, exclude_if=lambda v: v is None\n    )\n"
 )
+# ADR 0018 (T3): the signed lanes and first window of the audits, and their readers.
+FIRST_WINDOW_FIELD = (
+    "    first_window_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(\n"
+    "        default=None, exclude_if=lambda v: v is None\n    )\n"
+)
+LANES_ABSENT = (
+    POLICY + "test_the_lanes_and_the_first_window_keep_the_digest_and_run_id_while_absent"
+)
+LANES_CAP = (
+    POLICY + "test_the_lanes_are_signed_on_a_test_manifest_up_to_the_listed_auditors_and_the_queue"
+)
+WINDOW_BOUNDS = POLICY + "test_the_first_window_is_signed_between_two_leases_and_the_gap_cap"
+TEST_LEDGER_ONLY = POLICY + "test_a_production_manifest_keeps_two_lanes_and_no_first_window"
+WINDOW_HELPER = (
+    POLICY
+    + "test_the_published_first_window_is_the_last_wave_of_measured_lane_cycles_and_one_lease"
+)
+ONE_LANE_CAP = POLICY + "test_a_one_lane_first_window_needs_a_gap_cap_that_reaches_it"
+S17D_PIN = "tests/ops/s100/test_run_f3901a09_golden.py::" + (
+    "test_the_s17d_manifest_keeps_its_run_id_and_audit_policy_hash"
+)
+S20_PIN = "tests/ops/s100/test_run_0ef600b4_golden.py::" + (
+    "test_the_s20_manifest_keeps_its_run_id_and_audit_policy_hash"
+)
+LIVENESS = "tests/challenge/test_audit_liveness_v2.py::"
+LANES = LIVENESS + "test_the_signed_lanes_bound_the_leases_that_run_at_once"
+LATE_LEASE = LIVENESS + "test_a_signed_first_window_gives_a_late_lease_its_full_lease"
+EARLY_REARM = LIVENESS + "test_a_job_exhausted_early_is_rearmed_no_shorter_than_its_first_window"
+NO_LEAVES_END = (
+    "tests/challenge/test_no_show_v2.py::"
+    "test_a_member_without_leaves_is_dropped_at_the_end_of_the_first_window"
+)
+RETIRE_GATE = (
+    "tests/challenge/test_retire_round_v2.py::"
+    "test_a_signed_first_window_keeps_the_audit_window_of_a_round_nobody_audited_open"
+)
+REAPER_RELAY = (
+    "tests/challenge/test_exit_reaper_v2.py::"
+    "test_the_reaper_holds_a_round_nobody_audited_to_the_end_of_its_signed_first_window"
+)
+HOLD_RELAY = (
+    "tests/challenge/test_exit_contest_v2.py::"
+    "test_a_signed_first_window_moves_the_dispute_bound_of_a_held_no_show"
+)
+PLAN_FIRST = PLAN + "test_a_signed_first_window_moves_every_bound_that_waits_on_the_first_window"
+PLAN_MISSED = PLAN + "test_a_round_whose_audit_window_passed_without_jobs_is_marked"
+LANE_TERMS = "            self.max_queued_jobs, len(set(training.auditors))\n"
+WINDOW_RANGE_T3 = (
+    "            self.absolute_rounds() <= self.first_window_rounds <= self.gap_cap()\n"
+)
+PRODUCTION_T3 = "            self.max_running_jobs != 2 or self.first_window_rounds is not None\n"
 
 TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
     (
@@ -698,5 +751,164 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "                if needed > audit.gap_cap()\n",
         "                if False\n",
         (CAP_LEFT_AT_200,),
+    ),
+    (
+        "lanes past the listed auditors are accepted: a lane nobody can hold",
+        MESSAGES,
+        LANE_TERMS,
+        "            self.max_queued_jobs, 2**53\n",
+        (LANES_CAP,),
+    ),
+    (
+        "lanes past the queue are accepted",
+        MESSAGES,
+        LANE_TERMS,
+        "            2**53, len(set(training.auditors))\n",
+        (LANES_CAP,),
+    ),
+    (
+        "the lanes are any integer, zero and negative included",
+        MESSAGES,
+        "    max_running_jobs: Positive\n",
+        "    max_running_jobs: StrictInt\n",
+        (LANES_CAP,),
+    ),
+    (
+        "a first window shorter than two leases is accepted",
+        MESSAGES,
+        WINDOW_RANGE_T3,
+        "            self.first_window_rounds <= self.gap_cap()\n",
+        (WINDOW_BOUNDS,),
+    ),
+    (
+        "a first window past the gap cap is accepted",
+        MESSAGES,
+        WINDOW_RANGE_T3,
+        "            self.absolute_rounds() <= self.first_window_rounds\n",
+        (WINDOW_BOUNDS, ONE_LANE_CAP),
+    ),
+    (
+        "a production ledger mode may sign lanes other than 2",
+        MESSAGES,
+        PRODUCTION_T3,
+        "            self.first_window_rounds is not None\n",
+        (
+            TEST_LEDGER_ONLY + "[one-lane]",
+            TEST_LEDGER_ONLY + "[three-lanes]",
+            BUILDER_REFUSES_LIFT + "lanes]",
+            SERVICE_REFUSES_LIFT + "lanes]",
+        ),
+    ),
+    (
+        "a production ledger mode may sign a first window",
+        MESSAGES,
+        PRODUCTION_T3,
+        "            self.max_running_jobs != 2\n",
+        (
+            TEST_LEDGER_ONLY + "[first-window]",
+            BUILDER_REFUSES_LIFT + "first-window]",
+            SERVICE_REFUSES_LIFT + "first-window]",
+        ),
+    ),
+    (
+        "first_window_rounds always serialised: the exclusion is dropped and every run id moves",
+        MESSAGES,
+        FIRST_WINDOW_FIELD,
+        FIRST_WINDOW_FIELD.replace("default=None, exclude_if=lambda v: v is None", "default=None"),
+        (LANES_ABSENT, OMITTED, S17D_PIN, S20_PIN),
+    ),
+    (
+        "an absent first window means the gap cap instead of two leases",
+        MESSAGES,
+        "            self.absolute_rounds() if self.first_window_rounds is None"
+        " else self.first_window_rounds\n",
+        "            self.gap_cap() if self.first_window_rounds is None"
+        " else self.first_window_rounds\n",
+        (LATE_LEASE + "[unsigned]", NO_LEAVES_END + "[unsigned]"),
+    ),
+    (
+        "published first window without the two-lease floor",
+        MESSAGES,
+        "    return max(2 * lease_rounds, (waves - 1) * cycle_rounds + lease_rounds)\n",
+        "    return (waves - 1) * cycle_rounds + lease_rounds\n",
+        (WINDOW_HELPER + "[5-3-200]",),
+    ),
+    (
+        "published first window counts the waves down",
+        MESSAGES,
+        "    waves = -(-audits // lanes)\n",
+        "    waves = audits // lanes\n",
+        (WINDOW_HELPER + "[5-2-254]",),
+    ),
+    (
+        "published first window rounds the lane cycle down",
+        MESSAGES,
+        "    cycle_rounds = -(-cycle_seconds // BEACON_PERIOD_SECONDS)\n",
+        "    cycle_rounds = cycle_seconds // BEACON_PERIOD_SECONDS\n",
+        (WINDOW_HELPER + "[5-2-254]", WINDOW_HELPER + "[5-1-408]"),
+    ),
+    (
+        "lease_v2 keeps the literal two lanes",
+        STORE,
+        "                >= policy.max_running_jobs\n",
+        "                >= 2\n",
+        (LANES + "[1]", LANES + "[3]"),
+    ),
+    (
+        "the jobs of a round keep two leases as their first window",
+        STORE,
+        "            absolute = min(body.d_final, body.d_audit + policy.first_window())\n",
+        "            absolute = min(body.d_final, body.d_audit + policy.absolute_rounds())\n",
+        (LATE_LEASE + "[signed]", NO_LEAVES_END + "[signed]", EARLY_REARM + "[signed]"),
+    ),
+    (
+        "a lease carries the job's whole first window: AuditJobV2 refuses it (409)",
+        STORE,
+        '                absolute_deadline=min(row["absolute"], now + policy.absolute_rounds()),\n',
+        '                absolute_deadline=row["absolute"],\n',
+        (LATE_LEASE + "[signed]",),
+    ),
+    (
+        "a rearm cuts a signed first window short",
+        STORE,
+        '        absolute = min(max(now + policy.absolute_rounds(), row["absolute"]), '
+        "sealed.exp_drand)\n",
+        "        absolute = min(now + policy.absolute_rounds(), sealed.exp_drand)\n",
+        (EARLY_REARM + "[signed]",),
+    ),
+    (
+        "the retirement gate keeps two leases as the audit window (Lens M07)",
+        STORE,
+        "            if now < min(body.d_final, body.d_audit + audit.first_window()) - 1:\n",
+        "            if now < min(body.d_final, body.d_audit + audit.absolute_rounds()) - 1:\n",
+        (RETIRE_GATE + "[still-open]",),
+    ),
+    (
+        "the reaper gives the planner two leases as the first window (Lens M18)",
+        STORE,
+        "                    first_window_rounds=audit.first_window(),\n                ),\n",
+        "                    first_window_rounds=2 * audit.lease_rounds,\n                ),\n",
+        (REAPER_RELAY,),
+    ),
+    (
+        "the contest hold gives the planner two leases as the first window (Lens M17)",
+        STORE,
+        "            first_window_rounds=audit.first_window(),\n        )\n",
+        "            first_window_rounds=2 * audit.lease_rounds,\n        )\n",
+        (HOLD_RELAY,),
+    ),
+    (
+        "the planner's first window stays two leases",
+        EXIT,
+        "        return min(self.d_final, self.d_audit + self.first_window_rounds)\n",
+        "        return min(self.d_final, self.d_audit + 2 * self.lease_rounds)\n",
+        (PLAN_FIRST, PLAN_MISSED + "[signed]", REAPER_RELAY),
+    ),
+    (
+        "the planner's audits end stays four leases after d_audit",
+        EXIT,
+        "        return self.d_audit + self.first_window_rounds + 2 * self.lease_rounds\n",
+        "        return self.d_audit + 4 * self.lease_rounds\n",
+        (PLAN_FIRST, HOLD_RELAY),
     ),
 )

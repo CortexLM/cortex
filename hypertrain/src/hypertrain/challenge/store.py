@@ -7212,7 +7212,7 @@ class ChallengeStore:
                 "SELECT 1 FROM audit_leases_v2 WHERE run_id=? AND w=?", (run_id, w)
             ).fetchone():
                 raise refuse("audits were scheduled")
-            if now < min(body.d_final, body.d_audit + audit.absolute_rounds()) - 1:
+            if now < min(body.d_final, body.d_audit + audit.first_window()) - 1:
                 raise refuse("the audit window is still open")
 
         def hotkeys_of(kind: str) -> list[str]:
@@ -7453,6 +7453,7 @@ class ChallengeStore:
                     d_final=body.d_final,
                     lease_rounds=audit.lease_rounds,
                     reaudit_rounds=audit.reaudit_window(),
+                    first_window_rounds=audit.first_window(),
                 ),
                 roster=tuple(Member(e.hotkey, e.admission_id) for e in body.roster),
                 committed=hotkeys_of("commit"),
@@ -7685,6 +7686,7 @@ class ChallengeStore:
             d_final=body.d_final,
             lease_rounds=audit.lease_rounds,
             reaudit_rounds=audit.reaudit_window(),
+            first_window_rounds=audit.first_window(),
         )
         stage = {"commit": Wait.COMMIT, "leaves": Wait.LEAVES, "delta": Wait.DELTA}[record["stage"]]
         counted = [
@@ -8379,7 +8381,7 @@ class ChallengeStore:
                     missing.append((entry, identity, job_id, commit))
             if active + len(missing) > policy.max_queued_jobs:
                 raise ChallengeError(503, "audit capacity unavailable; no new reservation")
-            absolute = min(body.d_final, body.d_audit + policy.absolute_rounds())
+            absolute = min(body.d_final, body.d_audit + policy.first_window())
             if absolute <= now + 1:
                 raise ChallengeError(503, "audit absolute horizon exhausted")
             result = []
@@ -8544,11 +8546,14 @@ class ChallengeStore:
                 "SELECT 1 FROM audit_leases_v2 WHERE auditor=? AND state='running'", (env.signer,)
             ).fetchone():
                 raise ChallengeError(409, "one live lease per auditor")
+            policy = AuditPolicyV2.model_validate_json(
+                self.objects.get(manifest.network.audit_policy_hash)
+            )
             if (
                 self._db.execute(
                     "SELECT COUNT(*) FROM audit_leases_v2 WHERE state='running'"
                 ).fetchone()[0]
-                >= 2
+                >= policy.max_running_jobs
             ):
                 return None
             row = None
@@ -8592,9 +8597,7 @@ class ChallengeStore:
             if row is None:
                 return None
             nonce = secrets.token_hex(32)
-            lease_rounds = AuditPolicyV2.model_validate_json(
-                self.objects.get(manifest.network.audit_policy_hash)
-            ).lease_rounds
+            lease_rounds = policy.lease_rounds
             expires = min(now + lease_rounds, row["absolute"])
             start = StartStateV2.model_validate(self._record_v2(run_id, "start", identity))
             ef = self.objects.get(start.ef_object_sha256)
@@ -8608,7 +8611,7 @@ class ChallengeStore:
                 attempt=row["attempts"] + 1,
                 lease_nonce=nonce,
                 lease_expires=expires,
-                absolute_deadline=row["absolute"],
+                absolute_deadline=min(row["absolute"], now + policy.absolute_rounds()),
                 reservation_id=row["reservation"],
                 replay_step_budget=row["step_budget"],
                 anchor_age=0,
@@ -9000,7 +9003,9 @@ class ChallengeStore:
         new coordinator-signed challenge, bounded by the pinned max_attempts windows. The generic
         path only: a service-admitted run keeps its resource deadline. The window ends where the
         miner's sealed commit ends (an honest one: `d_final`): AuditJobV2 embeds it live, so a
-        window past that round could only drop the miner for a fault that is not its own."""
+        window past that round could only drop the miner for a fault that is not its own. Below
+        that it never ends before the job's own window: a job exhausted early keeps a signed first
+        window (ADR 0018 Part 2.4)."""
         from hypertrain.protocol.messages_v2 import AuditChallengeV2
 
         if self._db.execute(
@@ -9022,7 +9027,7 @@ class ChallengeStore:
         sealed = envelope_v2.parse_envelope(
             self._record_v2(run_id, "commit", f"{row['w']}:{row['hotkey']}")
         )
-        absolute = min(now + policy.absolute_rounds(), sealed.exp_drand)
+        absolute = min(max(now + policy.absolute_rounds(), row["absolute"]), sealed.exp_drand)
         if absolute <= now + 1:
             return False
         challenge = AuditChallengeV2.model_validate(
