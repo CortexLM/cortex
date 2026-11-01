@@ -478,11 +478,11 @@ cycle, or before it.
 
 | Item | Finding | Owned names edited | State | Size |
 | --- | --- | --- | --- | --- |
-| T1 | 4: the finalize gate at entry, with m1 and m2 closed | `finalize_v2` | written (`c9e612b3`); m1, m2 open; m3 to replay | to estimate |
+| T1 | 4: the finalize gate at entry; m1 closed by dating the vesting at the end of the replay (not by bounding the gap and refusing beyond it: D157, D120); m2 closed (authentication first) | `finalize_v2` | written (`c9e612b3`); m1, m2 open; m3 to replay | to estimate |
 | T2 | 5: the charge guard read under the store lock | `_service_charge_v2` | fix and red tests exist (`b3af43f`; a scratch copy gives 3 passed) | to estimate |
 | T3 | 2 and 3: lanes, auditors and the first audit window read from the signed audit policy | `schedule_audits_v2`, `lease_v2`; `open_round_v2` if service runs need it | not designed | to estimate |
-| T4, if chosen | 7 (b): the replay and the aggregate's compute out of process | `_run_finality_replay_v2`, `_aggregate_compute_v2` and callers | not designed; measure first | to estimate |
-| T5, if chosen | 6 (c): a bootstrap path | `open_round_v2`, `_require_survivors_v2`, or none [?] | not designed | to estimate |
+| T4, outside the train until designed (D157) | 7 (b): the replay and the aggregate's compute out of process | `_run_finality_replay_v2`, `_aggregate_compute_v2` and callers | not designed; measure first | to estimate |
+| T5, outside the train until designed (D157) | 6 (c): a bootstrap path | `open_round_v2`, `_require_survivors_v2`, or none [?] | not designed | to estimate |
 
 T1 and T2 edit `challenge/store.py` only and change no manifest default [V by reading `c9e612b3` and the
 weights-hardening fix]. T3 and T5 can add signed fields omitted when absent, which changes no default either;
@@ -561,8 +561,11 @@ rollback [H].
 
 Every duration is to estimate unless a file gives it.
 
-1. F14: the founder approves the content (T1-T3; T4 and T5 or not) and whether it ships before the next TEST
-   run.
+1. F14: scope in principle T1 + T2 + T3 in one hash train, the hash measured once when the content is
+   frozen; T4 and T5 stay outside the train until they are designed (D157, Principal SN100). T3 is designed
+   first, in an ADR without code, read by Lens and validated by Principal SN100 before any code; a design that
+   needs a new protocol constant or another policy field goes back to the founder. The founder also decides
+   whether it ships before the next TEST run.
 2. One lot per item, red test first, Lens on each: T1 (rebase `c9e612b3`, close m1 and m2, replay m3; Lens
    could not replay B's e2e under load, `delta-verdicts.md:607`), T2, T3 (design first). To estimate.
 3. One integration branch: the hash measured once, the golden constant updated once, the strict xfails flipped
