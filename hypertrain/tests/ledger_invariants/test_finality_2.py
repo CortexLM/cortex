@@ -464,6 +464,40 @@ def test_finalize_settles_as_the_first_request_after_a_restart(stage: Stage) -> 
     assert stage.finalize()["status"] == "SETTLED"
 
 
+def finalize_pins(stage: Stage) -> list[tuple[Any, ...]]:
+    """Every row a finalize's beacon gate has pinned."""
+    return stage.rows("SELECT * FROM beacon_pins_v2 WHERE operation_id LIKE ?", "finalize:%")
+
+
+def test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate(
+    stage: Stage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIN-04: the gate is judged before the replay (ADR 0017 T1) and its pin is written with
+    the round, so a finalize the ledger refuses after the replay leaves no beacon_pins_v2 row."""
+
+    def failing(hotkey: str) -> str:
+        raise EscrowError("INJECTED")
+
+    monkeypatch.setattr(stage.store._services(stage.run_id)[0], "owner_of", failing)
+    assert refusal(stage.finalize) == (EscrowError, None, "INJECTED")
+    monkeypatch.undo()
+    assert refusal(lambda: stage.finalize(1)) == (EscrowError, None, "FINALIZE_ORDER")
+    assert finalize_pins(stage) == []
+
+
+def test_a_settled_finalize_keeps_the_one_pin_of_its_gate(stage: Stage) -> None:
+    """FIN-04: a settled round keeps the pin its gate wrote, as when the gate was judged in its
+    own transaction: the view it pinned, that round's beacon signature, not paused."""
+    view = stage.store._now(stage.store._db)
+    assert stage.finalize()["status"] == "SETTLED"
+    assert stage.finalize()["status"] == "SETTLED"  # the stored answer: no gate, no second pin
+    [(signature,)] = stage.rows("SELECT signature FROM beacon WHERE round=?", view)
+    digest = sha256_hex(bytes.fromhex(signature))
+    assert finalize_pins(stage) == [
+        (stage.run_id, f"finalize:0:{view}", view, signature, digest, 0, None)
+    ]
+
+
 # -- FIN-06 / FIN-07: one credit per miner and round, rounds minted in order ----------------------
 
 
