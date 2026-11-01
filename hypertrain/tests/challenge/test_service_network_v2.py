@@ -595,7 +595,8 @@ def fixture_beacon(number):
     return {"round": b.round, "signature": b.signature, "randomness": b.randomness}
 
 
-# Fields a test adds to the audit policy of the `network` fixture (monkeypatch.setitem).
+# Fields a test adds to, or overrides in, the audit policy of the `network` fixture
+# (monkeypatch.setitem).
 AUDIT_POLICY_EXTRA: dict[str, int] = {}
 
 
@@ -680,14 +681,16 @@ def network(tmp_path: Path, request):
         cclip_iters=2,
     )
     audit = AuditPolicyV2(
-        lease_rounds=100,
-        max_attempts=2,
-        max_concurrent_per_auditor=1,
-        max_running_jobs=2,
-        max_queued_jobs=32,
-        max_anchor_age_rounds=1,
-        max_steps_per_attempt=2 * s.manifest.training.inner.H,
-        **AUDIT_POLICY_EXTRA,
+        **{
+            "lease_rounds": 100,
+            "max_attempts": 2,
+            "max_concurrent_per_auditor": 1,
+            "max_running_jobs": 2,
+            "max_queued_jobs": 32,
+            "max_anchor_age_rounds": 1,
+            "max_steps_per_attempt": 2 * s.manifest.training.inner.H,
+            **AUDIT_POLICY_EXTRA,
+        }
     )
     dispute = DisputePolicyV2(
         referees=[REFEREE.ss58],
