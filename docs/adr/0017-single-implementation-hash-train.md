@@ -304,8 +304,10 @@ and m3 replayed.
 
 **Cost.** One owned name; the 0ef600b4 golden constant; A's strict xfail and B's e2e and mutants.
 
-**Recommendation.** Include B with m1 and m2 closed (the vesting dated at the end of the replay, or the gap
-bounded and refused beyond; authentication first) and m3 replayed. D120 already asks for it before production.
+**Recommendation.** Include B with m1 and m2 closed (the vesting dated at the end of the replay; authentication
+first) and m3 replayed. Bounding the gap and refusing beyond it is not recommended: at 101 M a replay of
+160-237 s would exceed the bound and replay the 503 on every retry (Lens, 2026-11-01). D120 already asks for it
+before production.
 
 ### Finding 5. `_service_charge_v2` reads its guard without the store lock
 
@@ -623,8 +625,9 @@ TEST since 31/10 12:53Z (server `sha256:3bb5db0f…`, code `f357e61`; `agents/fo
 1. **An unreadable manifest is not cached** (Lens minor on `f357e61`,
    `livrables/lens/redteam-live/delta-verdicts.md:689`; backlog by D141, journal-01 `:133`).
    `_witness_unbuilt_v2` caches a run's beacon clock only on success or on a `ChallengeError`, and
-   `MalformedEnvelope` is a `ValueError`, so a permanently malformed manifest is re-read and journaled in a
-   `BEGIN IMMEDIATE` transaction on every push, about every 3 s (`store.py:7301-7308`, `:7353-7360`; commit
+   `MalformedEnvelope` is a `ValueError`, so a permanently malformed manifest is re-read on every push, about
+   every 3 s, in a `BEGIN IMMEDIATE` transaction that is opened with the journal left unchanged
+   (`store.py:7301-7308`, `:7353-7360`; commit
    `130117b`) [V by reading]. The cost is bounded and untested. The names involved are not owned, so the fix
    is hash-neutral [V]. The brief calls it m-1 and gives the commit as "130fd…": it is `130117b`.
 2. **TRN-05 is only an anti-abuse ceiling on the pinned runs.** Without `max_refs` and `max_parts` the budget
