@@ -63,9 +63,11 @@ def build_master_args(
     reaudit_rounds: int | None = None,
     gap_cap_rounds: int | None = None,
     ledger_mode: str = "test",
+    first_window_rounds: int | None = None,
 ) -> list[str]:
     """CLI global arguments for a state dir holding a real H=1 manifest and no live master; the
-    audit policy pins `reaudit_rounds` and raises `gap_cap_rounds` when they are given."""
+    audit policy pins `reaudit_rounds` and `first_window_rounds` and raises `gap_cap_rounds` when
+    they are given."""
     coord_seed = bytes(range(32))
     inputs = tmp_path / "inputs"
     assert manifest_main(["example", "--out", str(inputs), "--ledger-mode", ledger_mode]) == 0
@@ -79,6 +81,8 @@ def build_master_args(
         policies["audit"]["reaudit_rounds"] = reaudit_rounds
     if gap_cap_rounds is not None:
         policies["audit"]["gap_cap_rounds"] = gap_cap_rounds
+    if first_window_rounds is not None:
+        policies["audit"]["first_window_rounds"] = first_window_rounds
     policies_path.write_text(json.dumps(policies))
     owner_seed = tmp_path / "owner.seed"
     owner_seed.write_bytes(b"\x77" * 32)
@@ -214,6 +218,26 @@ def test_open_accepts_the_minimum_gap_when_the_manifest_raises_the_cap(
     with pytest.raises(Reached):
         live_operator.main(open_args(master_args, needed))
     assert master_calls == [("GET", "")]
+
+
+@pytest.mark.parametrize(("gap", "opens"), [(253, False), (254, True), (400, True)])
+def test_open_refuses_a_gap_below_the_signed_first_window(
+    tmp_path: Path, master_calls: list[tuple[str, str]], gap: int, opens: bool
+) -> None:
+    """ADR 0018 Part 2.4 and open question 5: a round narrower than the policy's
+    `first_window_rounds` would end the first audit window at d_final, before the audits it is
+    sized for, with no rearm after it; the tool refuses it rather than open it silently."""
+    master_args = build_master_args(tmp_path, gap_cap_rounds=400, first_window_rounds=254)
+    if opens:
+        with pytest.raises(Reached):
+            live_operator.main(open_args(master_args, gap))
+        assert master_calls == [("GET", "")]
+        return
+    with pytest.raises(SystemExit) as raised:
+        live_operator.main(open_args(master_args, gap))
+    message = str(raised.value)
+    assert "gap 253 (d_final-d_audit) is shorter than first_window_rounds 254" in message
+    assert master_calls == []
 
 
 def test_open_refuses_the_256_s_minimum_when_the_manifest_leaves_the_cap_at_200(
