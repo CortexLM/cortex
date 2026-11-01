@@ -104,14 +104,10 @@ MUTANTS = [
         "gf-finalize-gate-before-the-roster-guard",
         ["FIN-01"],
         STORE,
-        "            manifest = self._run_v2(run_id)\n"
-        "            self.require_roster_v2(run_id, w)\n"
-        "            if not self._db.execute(\n",
-        "            manifest = self._run_v2(run_id)\n"
+        "            boundary = self._service_boundary_v2(run_id, w)\n",
         '            self._authenticated_v2(run_id, raw, "Finalize", '
         "manifest.training.coord_pubkey)\n"
-        "            self.require_roster_v2(run_id, w)\n"
-        "            if not self._db.execute(\n",
+        "            boundary = self._service_boundary_v2(run_id, w)\n",
         [ROSTER_FIRST],
         "The signer gate moves in front of the roster guard (the order the Lens asked for): the "
         "test that documents the order of today fails, which is how a maintainer is told to "

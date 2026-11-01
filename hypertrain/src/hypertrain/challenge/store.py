@@ -10889,11 +10889,16 @@ class ChallengeStore:
         pins: list[tuple[Any, ...]] = []
         with self._tx():
             manifest = self._run_v2(run_id)
-            self.require_roster_v2(run_id, w)
-            if not self._db.execute(
-                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
-                (run_id, str(w)),
-            ).fetchone():
+            # A run behind a service boundary meets _service_boundary_v2(heavy=True) below, which
+            # refuses its finalize before any gate, as it always did: it is not gated here either.
+            boundary = self._service_boundary_v2(run_id, w)
+            if (
+                boundary is None
+                and not self._db.execute(
+                    "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
+                    (run_id, str(w)),
+                ).fetchone()
+            ):
                 operation = f"finalize:{w}:{self._now(self._db)}"
                 self._db.execute("SAVEPOINT finalize_gate")
                 try:
