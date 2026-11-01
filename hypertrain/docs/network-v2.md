@@ -695,7 +695,8 @@ four therefore cannot lose a member. Similarity alone is not fraud evidence.
 Audits replay each miner's own assignment.
 
 A miner whose audit could not run (no auditor finished it in two windows of two
-leases each; a master's replay `MISMATCH` that nobody signed gets instead one re-audit
+leases each, the first `first_window_rounds` long when the audit policy signs it; a
+master's replay `MISMATCH` that nobody signed gets instead one re-audit
 window of its own, started at the detection and lasting the manifest's `reaudit_rounds`,
 T_reaudit = twice the measured replay (D84, ADR 0011 Part 9), and a re-audit that does
 not decide the miner in it ends `REAUDIT_FAILED`, which drops that member alone, D87)
@@ -751,7 +752,8 @@ together. Otherwise `audits` or `aggregate` answers 409 `ROUND_INFEASIBLE`, no m
 left out, a `round-exit` record names the reason (`INFEASIBLE`) and the run stays blocked
 until an operator decision; there is no void round. Call `audits` once `d_audit` has passed
 and before `absolute` minus one round, `absolute` being the smaller of `d_final` and
-`d_audit` plus twice `lease_rounds`; a later call answers 503 for every roster and the round
+`d_audit` plus the first audit window (twice `lease_rounds`, or the audit policy's
+`first_window_rounds`, below); a later call answers 503 for every roster and the round
 cannot be audited.
 
 The minimum roster is arithmetic: the caps of the aggregation policy are protocol constants and
@@ -759,6 +761,41 @@ a round needs four members, so a roster of R members tolerates R - 4 left out. F
 none, five tolerate one, six tolerate two. `scripts/ops/live_operator.py open --tolerate K`
 (default 1) refuses a roster of fewer than 4 + K hotkeys and names the arithmetic; `--tolerate 0`
 opens four on purpose. The store itself keeps the protocol minimum of four.
+
+The first audit window is the audit policy's `first_window()`: twice `lease_rounds` (200 rounds
+at H <= 30), or `first_window_rounds` when the policy signs that optional key (ADR 0018). The key
+is omitted when absent, so a policy without it keeps its digest and its run id. A signed value
+lies between twice `lease_rounds` and `gap_cap()`, and the builder and the master refuse it
+outside a TEST manifest when they build or create the run (`validate_training`). Every audit job
+of the round gets that window, ended at `d_final` at the latest. A lease still lasts at most
+`lease_rounds`, and the job it hands out names an absolute deadline at most twice `lease_rounds`
+after the lease's round (inside the bound `AuditJobV2` checks, unchanged, so auditors on any image
+accept it): a wider window holds more leases one after another, not longer ones. The second
+window of a job that no auditor finished lasts two leases from the round it opens, or to the
+end of the first window when that is later, never past the miner's sealed commit. What waits
+for the end of the first window moves with it: a member that never posted its leaves (below),
+`AUDIT_WINDOW_MISSED` (retirement, below) and, through the end of the second window, the
+dispute bound of a contested NO_SHOW (above), each up to `first_window_rounds` minus twice
+`lease_rounds` rounds later, and a round with a member without leaves can settle that much later.
+The publisher measures the value: `messages_v2.first_window_rounds_for(audits, lanes,
+cycle_seconds, lease_rounds)` starts the last of `ceil(audits / lanes)` waves after the measured
+lease-to-complete cycles of the others and gives it one full lease, never less than two leases
+in all, `lanes` being the parallelism the run really has (the least of the signed lanes, the
+auditors that poll and the CUDA executor's hosts). `live_operator.py open` refuses a gap
+`d_final - d_audit` below a signed `first_window_rounds`; a gap of exactly that opens, but
+leaves no room for a second window after the first.
+
+Audit leases run at most `max_running_jobs` at a time in the run's store (the lanes, which the
+rounds of the run share), and one per auditor: a second lease of the same auditor answers 409, a
+lease past the lanes 204. Every policy so far signs 2, which serialises as before. The schema
+takes any positive integer (`Positive`); the cap is `validate_training`'s: lanes above 2 may not
+exceed `min(max_queued_jobs, distinct training.auditors)`, the queue being 32, and the builder and
+the master refuse a value other than 2 outside a TEST manifest. The audits that run at once are
+also bounded by the listed auditors that poll and by the CUDA executor's hosts (one audit per
+host). A run that signs lanes other than 2 or a first window needs a master image that has these
+fields: an older one refuses its policy (`literal_error`, `extra_forbidden`). Auditor, miner and
+GPU images need nothing: they never parse the audit policy, and `AuditJobV2` is unchanged. No
+round has run with more than two lanes or with a signed first window.
 
 A member that committed and never posted its leaves has no audit: its queued job is dropped at
 the first `absolute` (`excluded`, reason `NO_SHOW`, stage `leaves`), without a second window, and
