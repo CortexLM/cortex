@@ -263,6 +263,30 @@ def test_a_hold_is_dropped_at_the_dispute_bound_and_nobody_is_sanctioned(case, m
     assert case.sanctions() == [] and case.burned() == before
 
 
+def test_a_signed_first_window_moves_the_dispute_bound_of_a_held_no_show(monkeypatch, request):
+    """ADR 0018 (Lens m-1): `_contest_hold_v2` builds its schedule with the signed first window. The
+    hold ends at the dispute bound, the end of the re-audit window after the second audit window a
+    rearm opens at the end of the first: d_audit + F + 2 x lease + reaudit + 1, 200 rounds later
+    with F = 400 than with two leases."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", 400)
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "first_window_rounds", 400)
+    case = Round(request.getfixturevalue("six_network"), monkeypatch)
+    case.contest()
+    monkeypatch.setattr(ChallengeStore, "_close_blocked_disputes_v2", lambda *a, **k: None)
+    case.reach_commit_bound()
+    d_audit = case.opening.d_audit
+    push_through(case.n, d_audit + 4 * 100 + 100 + 1)  # the bound of an unsigned window
+    assert case.row()["state"] == "PENDING"
+    push_through(case.n, d_audit + 400 + 2 * 100 + 100)
+    assert case.row()["state"] == "PENDING"
+
+    push_through(case.n, d_audit + 400 + 2 * 100 + 100 + 1)
+
+    row = case.row()
+    assert (row["state"], row["blame"]) == ("WAIVED", "INFRASTRUCTURE")
+    assert case.sanctions() == []
+
+
 def test_a_round_retired_with_the_contest_open_does_not_release_the_hold(six_network, monkeypatch):
     # Given: only three of six commit, so the reaper retires round 0 for real at the bound, while
     # the contestant's contest about that round is open: a round with an open contest is not closed

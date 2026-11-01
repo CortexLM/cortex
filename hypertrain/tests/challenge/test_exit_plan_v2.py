@@ -11,10 +11,19 @@ from hypertrain.challenge import exit_v2 as x
 from hypertrain.challenge.admission import SeizureReason
 
 S = x.Schedule(
-    now=5, d_commit=30, d_audit=31, d_upload=150, d_final=231, lease_rounds=100, reaudit_rounds=100
+    now=5,
+    d_commit=30,
+    d_audit=31,
+    d_upload=150,
+    d_final=231,
+    lease_rounds=100,
+    reaudit_rounds=100,
+    first_window_rounds=200,  # AuditPolicyV2.first_window() of a policy that does not sign it
 )
 WIDE = replace(S, reaudit_rounds=171)  # 2 x a 256 s replay at 3 s a round (ADR 0011 Part 9)
 LONG = replace(S, d_upload=400, d_final=1000)  # a gap wider than two lease windows
+# A signed first window (ADR 0018): five audits, two lanes, 229 s cycles, at a gap of 400
+FIRST = replace(S, d_final=431, first_window_rounds=254)
 ROSTER = tuple(x.Member(f"h{i}", f"a{i}") for i in range(6))
 
 
@@ -41,14 +50,23 @@ def snap(*, at: int = 5, roster=ROSTER, **kw) -> x.RoundSnapshot:
     return x.RoundSnapshot(**{**base, **kw})
 
 
-@pytest.mark.parametrize("schedule", [S, WIDE], ids=["one-lease-window", "measured-window"])
+@pytest.mark.parametrize(
+    "schedule", [S, WIDE, FIRST], ids=["one-lease-window", "measured-window", "first-window"]
+)
 def test_every_wait_has_a_bound_no_later_than_the_second_audit_window_and_the_reaudit_window(
     schedule,
 ):
     assert set(x.BOUNDS) == set(x.Wait)
     for wait, bound in x.BOUNDS.items():
-        # a re-audit opens at a detection inside the second audit window and lasts its own rounds
-        latest = schedule.d_audit + 4 * schedule.lease_rounds + schedule.reaudit_rounds + 1
+        # a re-audit opens at a detection inside the second audit window, which a rearm opens at
+        # the end of the first one at the latest, and lasts its own rounds
+        latest = (
+            schedule.d_audit
+            + schedule.first_window_rounds
+            + 2 * schedule.lease_rounds
+            + schedule.reaudit_rounds
+            + 1
+        )
         assert schedule.now <= bound(schedule) <= latest, wait
 
 
@@ -64,6 +82,19 @@ def test_each_bound_is_a_round_schedule_value():
     assert due[x.Wait.MEMBER_STATE] == 1000
     at_the_door = (x.Wait.INFEASIBLE, x.Wait.ROTATION, x.Wait.OWN_CONTEST, x.Wait.FINALIZE_ORDER)
     assert [due[wait] for wait in at_the_door] == [LONG.now] * 4
+
+
+def test_a_signed_first_window_moves_every_bound_that_waits_on_the_first_window():
+    due = {wait: bound(FIRST) for wait, bound in x.BOUNDS.items()}
+    assert due[x.Wait.LEAVES] == FIRST.absolute == 31 + 254
+    assert due[x.Wait.AUDIT_WINDOW] == 31 + 254 - 1
+    # the second window a rearm opens at the end of the first, then the re-audit, then a contest
+    assert due[x.Wait.AUDIT_LEASE] == FIRST.audits_end == 31 + 254 + 2 * 100
+    assert due[x.Wait.REAUDIT] == 31 + 254 + 2 * 100 + 100
+    assert due[x.Wait.DISPUTE] == 31 + 254 + 2 * 100 + 100 + 1
+    assert (due[x.Wait.COMMIT], due[x.Wait.DELTA], due[x.Wait.MEMBER_STATE]) == (30, 150, 431)
+    # a round narrower than the signed window still ends its first window at d_final
+    assert replace(FIRST, d_final=231).absolute == 231
 
 
 def test_nothing_is_planned_before_the_commit_window_closes_or_for_an_applied_round():
@@ -188,13 +219,26 @@ def test_members_that_cannot_deliver_any_more_leave_too_few_before_their_audits_
     assert plan.exclusions == ()
 
 
-def test_a_round_whose_audit_window_passed_without_jobs_is_marked():
+@pytest.mark.parametrize(
+    ("schedule", "last"), [(S, 31 + 200 - 1), (FIRST, 31 + 254 - 1)], ids=["two-leases", "signed"]
+)
+def test_a_round_whose_audit_window_passed_without_jobs_is_marked(schedule, last):
     everyone = keys(*range(6))
-    kw = {"committed": everyone, "delivered": everyone}
-    last = S.absolute - 1
-    assert x.plan_round(snap(at=last, has_leases=False, **kw)).retire == "AUDIT_WINDOW_MISSED"
-    assert x.plan_round(snap(at=last - 1, has_leases=False, **kw)).retire is None
-    assert x.plan_round(snap(at=last, has_leases=True, **kw)).retire is None
+
+    def plan(at: int, has_leases: bool) -> x.RoundPlan:
+        return x.plan_round(
+            snap(
+                at=at,
+                schedule=replace(schedule, now=at),
+                has_leases=has_leases,
+                committed=everyone,
+                delivered=everyone,
+            )
+        )
+
+    assert plan(last, False).retire == "AUDIT_WINDOW_MISSED"
+    assert plan(last - 1, False).retire is None
+    assert plan(last, True).retire is None
 
 
 def test_a_missed_audit_window_books_the_blame_without_membership_facts():
