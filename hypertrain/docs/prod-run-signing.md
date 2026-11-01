@@ -84,7 +84,10 @@ expiry do not. [V] `protocol/messages_v2.py:243-249`
    `hypertrain.protocol.messages_v2`: `max(lease_rounds, ceil(2 × replay_seconds / 3))` rounds of 3 s, at
    most `2 × lease_rounds`. It changes the `run_id` (a run without the key keeps its own), and an image older
    than the field refuses the policy: ship the image first. [V] `protocol/messages_v2.py`,
-   [ADR 0011](../../docs/adr/0011-audit-integrity.md) Part 9 decision 9
+   [ADR 0011](../../docs/adr/0011-audit-integrity.md) Part 9 decision 9. Keep `max_running_jobs` at 2 and
+   leave `first_window_rounds` out: audit lanes other than 2 and a signed first audit window are for a TEST
+   manifest only, and the build and the master refuse them on a production ledger (ADR 0018). [V]
+   `protocol/messages_v2.py:832-837`
 
 ## S1 K_owner signs the manifest (runbook step 2)
 
@@ -103,7 +106,8 @@ uv run --frozen --extra trainer python -m hypertrain.ops.manifest_v2 build \
   `--state-dir`, the six objects go under `<state>/objects/`. [V] `ops/manifest_v2.py:132-153`
 - Refusals: `reward_authority` ≠ `coord_pubkey` (`PINNED_AUTHORITIES`), wrong `round_reward_units`
   (`MANIFEST_REWARD_BUDGET`), fewer than 2 auditors, an audit `reaudit_rounds` below one lease or above
-  two. [V] `ops/manifest_v2.py:89-98`
+  two, an audit `max_running_jobs` other than 2 or any `first_window_rounds` (TEST only). [V]
+  `ops/manifest_v2.py:89-98`
 
 Verify after signing, from `hypertrain/`:
 

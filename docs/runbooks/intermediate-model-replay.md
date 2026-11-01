@@ -24,8 +24,11 @@ The run was **not possible on the code this runbook was written on** (`2cfc2a2b`
 prerequisites **(a)** lock-free reference and **(b)** `copy_flags` out of the store lock are merged [V by
 reading], but no image is built from such a commit yet. **(e)** is in part: a TEST manifest may raise
 `gap_cap_rounds` above 200 and `live_operator open` takes its cap from the audit policy [V], but every audit must
-still end before `absolute = min(d_final, d_audit + 2 x lease_rounds)`, 600 s at H = 4 [V by reading], so five
-audits in series (718-1279 s [H]) still need the second executor host (config only). **(d)** is needed only if
+still end before `absolute = min(d_final, d_audit + first_window())`, 600 s at H = 4 by default [V by reading], so
+five audits in series (718-1279 s [H]) still need the second executor host (config only). Since ADR 0018 a TEST
+policy may sign a longer first window (`first_window_rounds`) and lanes other than 2 (`max_running_jobs`), with a
+server image that has them (section 5) [V by reading]; a lease still lasts at most 100 rounds, and nothing has run
+with either [A, ADR 0018]. **(d)** is needed only if
 H >= 31. The **(f)** tooling is merged (`challenge_image.sh executor --r2`, `r2-check`) [V by reading]; decide
 (f) from section 2. Start only when the images come from a commit that has (a) and (b), the second executor host
 is ready for the real run's executor config, Forge has answered the warm-up host question of section 1 step 3,
@@ -88,8 +91,9 @@ The real build may also take `HT_D20_AUDIT_GAP_ROUNDS=N` (S20, D104; optional, t
 policy then signs `gap_cap_rounds = N`, so `live_operator.py open` accepts rounds whose `d_final - d_audit` reaches N.
 N below 200 or below the gap the re-audit window needs (175 for a window of 100) is refused with nothing left, and
 the manifest stage refuses N above `2 * absolute_rounds + reaudit window` (500 for a window of 100) [V]. A wider gap
-is not one longer audit lease: a job still expires at `min(d_final, d_audit + 200)` with a lease of 100 and may be
-rearmed once for another 200 rounds, up to `d_final` [V, code read, not run]. Without the variable the build is
+is not one longer audit lease: a job still expires at `min(d_final, d_audit + 200)` with a lease of 100, unless the
+policy also signs `first_window_rounds` (section 5), and may be rearmed once for another 200 rounds, up to `d_final`
+[V, code read, not run]. Without the variable the build is
 unchanged: the rebuild of `f3901a09` from its S17d inputs gives the same run id and byte-identical inputs, policies
 and manifest [V].
 
@@ -325,25 +329,37 @@ replay near `T_cold` means the cache did not carry.
   shows otherwise, keep it as the margin of `d_assign` below: it only delays the round. Then five sequential
   `run-v2` of about 90 s; `d_audit` = `d_commit` + 2; `d_upload` after the last relay receipt; `d_final` >=
   `d_audit` + the audit batches: an audit has to complete before `absolute` = `min(d_final,
-  d_audit + 2 x lease_rounds)`. The aggregate and the finalize may follow `d_final` (since `5bc7524d`) and compute
+  d_audit + first_window())`, `2 x lease_rounds` unless the policy signs `first_window_rounds` (below). The
+  aggregate and the finalize may follow `d_final` (since `5bc7524d`) and compute
   without the store lock (since `e2f47116`), but call the aggregate before it: it reads each audited member's
   admission at the call and leaves out one whose screen has ended (`SCREEN_LAPSED`), or answers 409
   `ROUND_INFEASIBLE` if too few remain. In rounds of 3 s: `d_open >= ceil(build/3) + 30`,
   `d_assign >= d_open + ceil(8.3 x open_lock/3) + 10`, `d_commit >= d_assign + ceil(5 x T_run/3) + 20`.
   `d_final - d_audit` must lie between `reaudit_gap_needed(100, reaudit_rounds)` and the audit policy's cap:
   `live_operator.py open` refuses a shorter gap (`check_reaudit_gap`) and a wider one (`check_open_shape` with
-  `gap_cap()`, 200 unless `gap_cap_rounds` raises it on a TEST manifest; `live_operator.py:130-191,213-215`) [V by
-  reading]. Above a 174 s replay the builder sets the cap to that gap, so the gap is exactly it (section 4). The
-  first window of every audit still ends at `absolute`, at most 200 rounds after `d_audit` whatever the gap; a
-  wider gap holds the re-audit window of a withheld MISMATCH (`exit_v2.py:162-167`), not more first-window audits.
+  `gap_cap()`, 200 unless `gap_cap_rounds` raises it on a TEST manifest), and one below a signed
+  `first_window_rounds` (`check_first_window_gap`; `live_operator.py:130-204,227-230`) [V by
+  reading]. Above a 174 s replay the builder sets the cap to that gap, so the gap is exactly it (section 4). Unless
+  the policy signs `first_window_rounds` (below), the first window of every audit still ends at `absolute`, at most
+  200 rounds after `d_audit` whatever the gap; a wider gap holds the re-audit window of a withheld MISMATCH
+  (`exit_v2.py:169-174`), not more first-window audits.
   The audits must fit `ceil(batches x T_audit/3)` in that window: at H = 4 on one executor host this is 718-1279 s,
-  240-427 rounds [H], over 200; that is still the second executor host of prerequisite (e). Do not copy the
+  240-427 rounds [H], over 200; that is still the second executor host of prerequisite (e). A TEST policy may sign
+  that window (ADR 0018) [V by reading]: `first_window_rounds`, between 200 rounds and `gap_cap()`, ends it at
+  `min(d_final, d_audit + first_window_rounds)`; each lease still lasts at most 100 rounds, and a member without
+  leaves is then dropped only at that end, so its round settles later. Its publisher derives it with
+  `messages_v2.first_window_rounds_for(audits, lanes, cycle_seconds, 100)` from a measured lease-to-complete cycle,
+  `lanes` being the least of the signed `max_running_jobs`, the auditors that poll and the executor hosts (one
+  audit per host). Lanes other than 2 are TEST only too and need as many distinct listed auditors (the schema takes
+  any positive integer; `validate_training` caps lanes above 2 at the least of 32 and the listed auditors). A gap
+  of exactly the window leaves no rearm room after it: open at the window plus the room wanted. Signing either
+  needs a server image that has them; no run has signed either [A, ADR 0018]. Do not copy the
   offsets of `launch_cuda_run.sh` (`OFFSETS` default, gap 100) or the tiny-run example of
   `docs/s100-test-stack.md` section 5: `open` refuses a gap below `reaudit_gap_needed` for this policy. `open` also
   refuses a roster hotkey whose `screen_until` is before `d_final` (`open_round_v2`, `live_operator.open_round`);
   the 20000-round screen covers the 4,800-7,200 rounds of the campaign (ADR 0015, Decision 2). Open only with a
   vector that `live_operator.py open` accepts (`check_gap_cap`, `check_open_shape` with the policy's cap,
-  `check_reaudit_gap`) and that the measurements support.
+  `check_reaudit_gap`, `check_first_window_gap`) and that the measurements support.
 - Before `audits`: `round_status.py` shows commit, leaves, accept, assignment and start equal to 5, no lease, and
   the rounds `d_assign` and `d_audit` present in `beacon_gaps.py`. Then run `audits` once, at `d_audit` (it is
   refused from `absolute - 1`): the minimum gap of the re-audit window does not count the rounds before the first
@@ -387,9 +403,11 @@ size:
 1. **Lock** over 150 s (the `beacon` command writes only catch-up 60) or any `missing`/`stranded` gap: stop.
 2. **Window**: two consecutive trials over 270 s, or any `409 envelope expired`: stop.
 3. **Audits and tail**: a go/no-go at `open`, not at `audits`. The vector must satisfy
-   `reaudit_gap_needed <= d_final - d_audit <= gap_cap()` (`live_operator.py open` refuses it otherwise), and the
+   `reaudit_gap_needed <= d_final - d_audit <= gap_cap()` and, when the policy signs `first_window_rounds`,
+   `d_final - d_audit >= first_window_rounds` (`live_operator.py open` refuses it otherwise), and the
    first-window audits, `ceil(batches x T_audit / 3)` rounds, must end before `absolute` =
-   `min(d_final, d_audit + 200)`, with `T_audit` from the warm-up trials scaled by section 6. The aggregate and the
+   `min(d_final, d_audit + 200)` (`d_audit + first_window_rounds` when signed, section 5), with `T_audit` from the
+   warm-up trials scaled by section 6. The aggregate and the
    finalize have no lease or `d_final` bound (`5bc7524d`) and may run after `d_final`; the aggregate leaves out a
    member whose admission does not qualify at the call and answers 409 `ROUND_INFEASIBLE` if too few remain. With
    two auditors on one executor host a lease sees about `2 x T_audit`, which must stay under `lease_rounds x 3`

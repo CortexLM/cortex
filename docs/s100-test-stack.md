@@ -409,7 +409,8 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/w
 
 **`d_final - d_audit` decides how many audit leases fit in a round.** The store dates every lease
 by the round it starts in (`created_beacon = now`), so a lease validates at any round before
-`absolute = min(d_final, d_audit + 2 * lease_rounds)`; `lease_rounds` is 100 for H <= 30. With a
+`absolute = min(d_final, d_audit + first_window())`, `2 * lease_rounds` unless the audit policy
+signs `first_window_rounds` (below); `lease_rounds` is 100 for H <= 30. With a
 gap of 100 rounds or less the first lease runs to `d_final`: if its auditor goes silent the job is
 not replaced, because an honest miner seals its commit until `d_final` and an audit job embeds it
 live, so no window can start after that round; the miner is left out of the round (`excluded`,
@@ -419,6 +420,23 @@ auditor if a replay still fits before `d_final` (ADR 0011 Part 9, decision 8).
 With a gap of 101 to 200 rounds a second auditor can take the job
 inside the same window, and a job whose attempts fail early gets a second window that ends at
 `d_final` (`audit-rearm`).
+
+**A TEST manifest may sign the audit lanes and the first window (ADR 0018).** The audit policy's
+`max_running_jobs` (2 in every run so far) is how many leases run at once in the run's store, one
+per auditor; a lease past it answers 204. Its schema takes any positive integer: the cap,
+`min(32 queued jobs, distinct training.auditors)` above 2, is `validate_training`'s, which also
+refuses a value other than 2 outside a TEST ledger. The optional `first_window_rounds` (omitted
+when absent, so a policy without it keeps its run id) ends the first window of every job at
+`min(d_final, d_audit + first_window_rounds)`; `validate_training` keeps it between
+`2 * lease_rounds` and the gap cap, on a TEST ledger only. Each lease still lasts at most
+`lease_rounds`, a rearm never ends before the job's first window, and a member without leaves is
+dropped, and `AUDIT_WINDOW_MISSED` fires, at the end of that window instead of 200 rounds after
+`d_audit`, so such a round can settle later. The publisher derives the value with
+`messages_v2.first_window_rounds_for(audits, lanes, cycle_seconds, lease_rounds)` from a measured
+lease-to-complete cycle, `lanes` being the least of the signed lanes, the auditors that poll and
+the CUDA executor's hosts (one audit per host). Signing either needs a challenge image that has them: an
+older one refuses the policy (`literal_error`, `extra_forbidden`); the auditors need nothing. No
+TEST round has run with more than two lanes or a signed first window.
 
 **A withheld `MISMATCH` needs room for its whole re-audit window (D88).** An auditor that does not sign the
 verdict the master stored (20 rounds after the storing, or at the lease's end) makes the job open a re-audit
@@ -436,12 +454,14 @@ auditor's wait after the detection): run `audits` at `d_audit` exactly and poll 
 for 256 s, and the 20 s poll (7 + 7) fits. At gap 100 nothing fits. When the second auditor does not decide
 in time, its member alone is left out of the round as an `INFRASTRUCTURE` exclusion without a sanction (ADR
 0011 Part 9, decisions 10 and 12).
-`live_operator.py open` accepts any gap from 2 to the cap of the policy (200 by default) for every H. A round
-with a wider gap closes later: 100 more rounds (5 minutes) per extra 100.
+`live_operator.py open` accepts any gap from 2 to the cap of the policy (200 by default) for every H, but
+not one below a signed `first_window_rounds` (a gap of exactly it opens with no room for a rearm after the
+first window: open at the window plus the room wanted). A round with a wider gap closes later: 100 more
+rounds (5 minutes) per extra 100.
 
 Run `audits` as soon as `now >= d_audit`: it must be called before beacon round `absolute - 1`
-(`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every
-roster.
+(`absolute = min(d_final, d_audit + first_window())`, above), and a call after that answers 503 for
+every roster.
 
 Run `finalize` (it aggregates first) before `d_final`. The aggregate reads every audited member's
 admission at the call and leaves out one that no longer qualifies (`excluded`, reason
