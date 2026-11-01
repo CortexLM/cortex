@@ -2,15 +2,13 @@
 
 - Status: draft, 2026-11-01 (brief `adr-0017-t3-design`; D157 and D159, Principal SN100). Design only ("ADR, sans
   code", D157, `agents/principal-sn100.md:39`): Lens reads it, then Principal SN100 validates it before any code is
-  written (`livrables/forge/briefs/adr-0017-t3-design.md:3`). Written
-  on branch `adr-0017-t3-design`, started from `adr-0017-consolidated` `51800d9`, against origin/v3 `dc014508`
-  (still the tip of `v3` by `git ls-remote` on 2026-11-01 at 17:37Z). No file under `hypertrain/` changes, so no
-  hash moves in this lot [V].
+  written (`livrables/forge/briefs/adr-0017-t3-design.md:3`). Written on branch `adr-0017-t3-design`, started from
+  `adr-0017-consolidated` `51800d9`, against origin/v3 `dc014508` (still the tip of `v3` by `git ls-remote` on
+  2026-11-01 at 17:37Z). No file under `hypertrain/` changes, so no hash moves in this lot [V].
 - Number: 0018 is free on every branch tip of origin, checked on 2026-11-01 [V]. Besides ADR 0017 itself
   (`adr-0017-consolidated`), two unmerged drafts are numbered 0017, `0017-admission-trial-window.md`
   (`v3-trial-rounds` `f4f2bc2c`) and `0017-miner-fast-path.md` (`v3-miner-fast-path` `f6b9ce02`); none holds a
-  0018 [V]. If one of them is renumbered later, it takes 0019 or
-  above; Forge decides.
+  0018 [V]. If one of them is renumbered later, it takes 0019 or above; Forge decides.
 - Labels, paths and abbreviations are those of ADR 0017 (`0017-single-implementation-hash-train.md:19-31`).
   **[V]** proved: read in code at `dc014508`, run as a command, or pinned by a test. **[A]** reported by a cited
   document. **[H]** inferred, or arithmetic on cited figures. **[?]** unknown. Code paths are relative to
@@ -18,8 +16,9 @@
   `livrables/forge/2026-10-30_s21-s22-round-settled/`.
 - **The probe.** A scratch prototype of this design, made on a `git archive` of `dc014508` in
   `/var/lib/openbot/scratch-forge/adr-0017-t3-design/`. It is not delivered, and it is deleted at the end of the
-  session. Part 4 gives its edits and Part 7 its tests; the session's REPORT
-  (`livrables/forge/2026-11-01_adr-0017-t3-design/REPORT.md`) keeps its diff, commands and outputs. It shows
+  session. Part 4 gives its edits and Part 7 its tests. The session's folder
+  `livrables/forge/2026-11-01_adr-0017-t3-design/` keeps its diff (`probe/src.diff`, `probe/tests.diff`), its
+  scripts and mutant results (`probe/mutants.txt`), and its `REPORT.md` the commands and outputs. It shows
   that the design can be built and what it moves. It is not the code lot: that lot is written after validation,
   red test first.
 - Related: ADR 0017 findings 2, 3 and 6 and its train table (`:176-292`, `:409-469`, `:565-577`). ADR 0011 Part 2
@@ -30,22 +29,23 @@
 
 ## Decision in brief
 
-T3 reads two values from the signed audit policy, and proposes both as TEST-only for now (open question 6):
+T3 reads two values from the signed audit policy, and proposes both as TEST-only for now (open question 7):
 - **Lanes: the existing `max_running_jobs`.** It is widened from `Literal[2]` to `Positive` (1 to 2^53 - 1), with
   at most 32 checked in `validate_training`, and `lease_v2` reads it in place of its literal `>= 2`.
 - **First window: a new optional field, `first_window_rounds`.** It is omitted from the canonical body when it is
-  absent, and absent means today's `absolute_rounds()`. `schedule_audits_v2` reads it, and so do the unowned
-  copies of the window: the exit planner's `Schedule.absolute` and `audits_end`, `_retire_round_v2`, and the
-  rearm, which no longer ends a job's second window before its first one.
+  absent, and absent means today's `absolute_rounds()`. `schedule_audits_v2` reads it, and so does the unowned
+  code that copies the window: the exit planner's `Schedule.absolute` (with `audits_end`, which assumes it) and
+  `_retire_round_v2`. The rearm keeps at least the job's stored first-window end, so a signed window is never cut
+  short by a rearm.
 
 Every lease keeps the two-lease bound that `AuditJobV2` already enforces. No auditor-count field is added: the
 signed `training.auditors` list already says who may serve. `manifest.training.auditors[:2]` only fills a record
 that no code reads by kind (the rollback digest hashes it, Part 2.3).
 
 The design edits two owned names, `schedule_audits_v2` and `lease_v2`, and proposes to leave `open_round_v2`
-untouched (open question 5). It needs
-no new protocol constant, no changed default and no policy field outside the lanes / auditors / first window
-family. While the new values are absent, every pinned run keeps its bytes and its run id.
+untouched (open question 6). It needs no new protocol constant, no changed default and no policy field outside
+the lanes / auditors / first window family. While the new values are absent, every pinned run keeps its bytes and
+its run id.
 
 T3 does not buy executor capacity, and it does not fix 101 M audits: see "Back to the founder".
 
@@ -114,8 +114,8 @@ recommends a first-window rule in the train, the `AuditInputError` handler shipp
 - `_retire_audit_attempt_v2` (`:8764-8806`): it requeues the job, or exhausts it if `attempts >= 2` (`:8773`), if
   `now >= absolute`, or if no untried auditor is left (`_auditors_left_v2`, `:8833-8836`) [V]. Only an
   `AUDITOR_SILENT` attempt cools its auditor down. An auditor whose execution is still `REQUESTED` when its lease
-  ends is `EXECUTOR_INTERRUPTED` and is not cooled down; one whose verdict was stored (`EXECUTED`) and left
-  unsigned is `AUDITOR_SILENT` (`:8754-8762`, `:8795-8801`) [V].
+  ends is `EXECUTOR_INTERRUPTED` and is not cooled down; one that never asked for the execution, or whose verdict
+  was stored (`EXECUTED`) and left unsigned, is `AUDITOR_SILENT` (`:8754-8762`, `:8795-8801`) [V].
 - `_exhaust_audit_job_v2` (`:8965-8996`) and `_rearm_audit_job_v2` (`:8998-9043`):
   - A job gets at most `policy.max_attempts` windows (`:9020`).
   - The second window is `min(now + absolute_rounds(), commit.exp_drand)` (`:9025`), and none is opened when that
@@ -141,7 +141,8 @@ recommends a first-window rule in the train, the `AuditInputError` handler shipp
   `Schedule` (`:7448-7456`, `:7680-7688`). None of these three functions is owned. `_contest_hold_v2` is the only
   reader of `BOUNDS` in `src`, for `COMMIT`, `LEAVES`, `DELTA` and `DISPUTE` (`:7689-7705`) [V].
 - `absolute_rounds()` is also the cooldown cap (`:8957`, `challenge/audit_cooldown_v2.py:89-93`) and the rearm
-  window (`:9025`). Those are other meanings, and T3 keeps them.
+  window (`:9025`). Those are other meanings. T3 keeps the cooldown cap, and keeps `absolute_rounds()` as the
+  rearm's length, but no longer lets a rearm end before the job's first window (Part 2.4).
 
 ### 1.5 The schema literals and `validate_training`
 
@@ -187,9 +188,10 @@ recommends a first-window rule in the train, the `AuditInputError` handler shipp
   `round-resource` with `"max_attempts": 2`, `"max_running_jobs": 2` and
   `"memory_reservation_bytes": 1 << 30` (`:5918-5929`) [V].
 - The generic open's service block refuses `d_final > d_audit + 200` (`:6017-6018`) and writes the same three
-  literals (`:6019-6023`). That block is not reachable in normal flow: a service-admitted run returns at `:5969`
-  or meets the heavy 503 at `:5700` or `:5970` (`:5241-5244`) [V by reading]. Every open outside the prepared
-  path checks `d_final - d_audit >= 2` (`:6025-6026`; the prepared path at `:5723`) [V].
+  literals (`:6019-6023`). That block is not reachable in normal flow: a service-admitted run returns at `:5969`,
+  is refused inside the prepared path (for example `:5732`), or meets the heavy 503 at `:5700` or `:5970`
+  (`:5241-5244`) [V by reading]. Every open outside the prepared path checks `d_final - d_audit >= 2`
+  (`:6025-6026`; the prepared path at `:5723`) [V].
 - No code in `src`, tests or scripts reads those three keys. `deadline` is read (`:5295-5297`, `:10484-10487`).
   `_rollback_snapshot_v2` digests the record's bytes with every other record (`:11970-11976`) [V].
 - A run without a service-admission record, as every pinned TEST run is (`service_admission_rows` 0,
@@ -236,11 +238,12 @@ change.
 
 - `lease_v2` returns None (204) while the store's running leases number `policy.max_running_jobs` or more, where
   `policy` is the signed audit policy of the run that asks. The count stays store-wide, as today. Because each
-  run after the first has its own child store, that means per run, and shared by the rounds of the run (Part 1.2)
-  [V by reading].
-- The policy is now read before the count, not after a job is found (`:8595-8597`). A poll that finds the lanes
-  full therefore fails, instead of answering 204, if the policy object cannot be read. That object is pinned at
-  run creation and read by every later audit path, so this is an edge case [V by reading; H].
+  run after the first has its own child store, that means per run, and shared by the rounds of the run (the
+  premises table, Context) [V by reading].
+- The policy is now read before the count, not after a job is found (`:8595-8597`). A poll that would answer 204
+  (lanes full, `:8547-8553`, or no leasable job, `:8592-8593`) therefore fails instead if the policy object cannot
+  be read. That object is pinned at run creation and read by every later audit path, so this is an edge case [V
+  by reading; H].
 - The number of audits that can run at once is the least of three things: the lanes, the listed auditors that
   poll (one lease each), and the executor hosts (one job each; Part 1.8). The lanes and the auditor list are
   signed; how many of the listed auditors poll, and how many hosts the executor has, are operational, and the
@@ -285,8 +288,8 @@ change.
     most 200 (`:5724`, `:6017-6018`) and it has no rearm (`:9006-9010`) or re-audit (`:8845-8856`) [V by
     reading].
 - **The rearm never ends before the first window.** `_rearm_audit_job_v2` (not owned) sets `absolute =
-  min(max(now + absolute_rounds(), row["absolute"]), commit.exp_drand)` instead of `min(now + absolute_rounds(),
-  commit.exp_drand)` (`:9025`).
+  min(max(now + policy.absolute_rounds(), row["absolute"]), sealed.exp_drand)` instead of `absolute = min(now +
+  policy.absolute_rounds(), sealed.exp_drand)` (`:9025`; `sealed` is the parsed commit envelope, `:9022-9024`).
   - With the field absent this is today's value: the row's `absolute` is at most `d_audit + absolute_rounds() ≤
     now + absolute_rounds()` [V by reading; probe].
   - With F signed, a job exhausted early (two fast executor failures, `_fail_audit_attempt_v2` `:9753-9792`, or no
@@ -298,15 +301,23 @@ change.
     (`now ≤ d_audit + F`) [V by reading].
   - A first window that reaches `d_final` leaves no rearm (Part 1.3). One shorter than the gap keeps up to
     `min(absolute_rounds(), gap - first_window)` rounds of rearm at its end [V by reading; H].
-- **What a signed window delays.** Every job that resolves at the end of the first window resolves at `d_audit +
-  F` instead of `d_audit + absolute_rounds()`: a member that never posted its leaves (dropped NO_SHOW only when its
-  queued job is exhausted at `absolute`, `:8566-8573`, `:8732-8738`, `:8970-8985`), a queued job nobody leases,
-  and `AUDIT_WINDOW_MISSED` (`exit_v2.py:284`). Until then `unresolved_audits` stays above 0 and the finalize
-  refuses (`challenge/finality_v2.py:68-76`). Such a round settles up to `F - absolute_rounds()` rounds later. In
-  the probe, a member without leaves stayed queued at `d_audit + 399` and was exhausted at `d_audit + 400` under
-  F = 400, against `d_audit + 200` without the field. A contested NO_SHOW is held as much longer, because
-  `Wait.DISPUTE` moves with `audits_end` (Part 1.4). Only an audit that a lane reaches resolves earlier (Part 8)
-  [V by reading; probe test].
+- **What a signed window delays.** Two things resolve at the end of the first window, so they move from `d_audit +
+  absolute_rounds()` to `d_audit + F`: a member that never posted its leaves (dropped NO_SHOW only when its queued
+  job is exhausted at `absolute`, `:8566-8573`, `:8732-8738`, `:8970-8985`) and `AUDIT_WINDOW_MISSED`
+  (`exit_v2.py:284`). Until then `unresolved_audits` stays above 0 and the finalize refuses
+  (`challenge/finality_v2.py:68-76`), so such a round settles up to `F - absolute_rounds()` rounds later. In the
+  probe, a member without leaves stayed queued at `d_audit + 399` and was exhausted at `d_audit + 400` under
+  F = 400, against `d_audit + 200` without the field [V, probe test].
+  - A queued job with leaves that nobody leases is rearmed at the end of the first window, as today. It resolves at
+    `min(d_final, d_audit + F + absolute_rounds())` instead of `min(d_final, d_audit + 2·absolute_rounds())`: no
+    later at a gap of 400 or less, and later by at most `min(F + absolute_rounds(), gap) - 2·absolute_rounds()`
+    rounds above it (two reviewers' scratch runs on the probe at gap 400: exhausted at `d_audit + 400` with F
+    absent, 254 and 400) [V by reading; A for those runs].
+  - `Wait.LEAVES` and `Wait.AUDIT_WINDOW` follow `Schedule.absolute`, so `_contest_hold_v2` counts a contest of a
+    leaves-stage NO_SHOW opened before `d_audit + F` (`store.py:7690-7694`), where the job itself now exhausts. A
+    contested NO_SHOW is also held up to `F - absolute_rounds()` rounds longer, because `Wait.DISPUTE` moves with
+    `audits_end` (Part 1.4) [V by reading].
+  - Only an audit that a lane reaches resolves earlier (Part 8).
 - **Bounds.** It is never shorter than today (`≥ absolute_rounds()`) and never longer than the widest gap the
   operator tool may open (`≤ gap_cap()`, at most `2·absolute_rounds() + reaudit_window()`, 500 rounds at a lease
   and a re-audit window of 100, `messages_v2.py:792-793`). Effective bound: `min(d_final, d_audit +
@@ -332,12 +343,14 @@ change.
     count on as many hosts. `lanes` is the parallelism the run really has: the least of the lanes, the polling
     auditors and the hosts (2.2). `audits` is the planned roster.
   - Cycles are counted from `d_audit`; the first lease came 12-38 s after it in the gap-400 rounds (Part 8). At
-    31 M the full last lease absorbs that: 100 rounds against a 77-round cycle leave 23 rounds (69 s). A model
-    whose cycle nears the lease would need the delay added [H].
-  - Worked [H]: at 31 M the gap-400 watches give 180-229 s lease to complete (Part 8). Five audits, two lanes and
-    229 s give 3 waves and 77-round cycles: 254 rounds (762 s), which needs a gap of at least 254 and leaves a
-    rearm window of 146 rounds at a gap of 400. Five audits on three lanes give 177, floored to 200: the field is
-    not needed. One lane gives 408, which needs `gap_cap_rounds` ≥ 408 (at most 500) and rounds at that gap.
+    31 M the full last lease absorbs that delay and the 0-8 s between waves: 100 rounds against a 77-round cycle
+    leave 23 rounds (69 s), against at most 38 + 2·8 = 54 s for three waves. A model whose cycle nears the lease
+    would need the delays added [H].
+  - Worked [H]: at 31 M the gap-400 watches give 181-229 s lease to complete (190-229 s paired, 181-206 s alone;
+    Part 8). Five audits, two lanes and 229 s give 3 waves and 77-round cycles: 254 rounds (762 s), which needs a
+    gap of at least 254 and leaves a rearm window of 146 rounds at a gap of 400. Five audits on three lanes give
+    177, floored to 200: the field is not needed. One lane gives 408, which needs `gap_cap_rounds` ≥ 408 (at most
+    500) and rounds at that gap.
   - The fifth audit of each gap-400 round needed 613-666 s from `d_audit` to finish its first attempt (Part 8),
     205-222 rounds, and at most about 230 rounds (689 s) with the latest start (460 s) and the slowest paired
     cycle (229 s). 254 rounds (762 s) cover it [H].
@@ -352,7 +365,7 @@ A production ledger therefore keeps two lanes and a first window of `absolute_ro
 until a TEST run measures the new geometry (ADR 0017 finding 2's recommendation). Lifting the lane rule later edits
 `messages_v2.py` only. A production first window above 200 also needs the gap-cap TEST rule lifted, in
 `messages_v2.py:794-797` and in the operator tool (`hypertrain/scripts/ops/live_operator.py:158-167`). None of
-these files is hashed; each change ships with a server image (open question 7). [V by reading, design]
+these files is hashed; each change ships with a server image (open question 8). [V by reading, design]
 
 ### 2.6 Who reads the new values, and the image order
 
@@ -370,11 +383,15 @@ these files is hashed; each change ships with a server image (open question 7). 
   is built, as for `reaudit_rounds` (`0011-audit-integrity.md:1944-1950`) [A].
 - A rollback below T3 breaks every run that signs either field, because the old image cannot parse its policy.
   It is worse than that run alone. On the old image, each beacon push expires the run's leases outside any guard
-  (`challenge/store.py:1017`), and expiring or exhausting a job parses the policy (`:8867`, `:8929`, `:9012`). The
-  error then leaves that child's `push_beacon`, and the root forwards pushes to its children in a plain loop
-  (`:959-960`), so the children after it stop getting beacons. The run cannot be retired on the old image either:
-  the `AUDIT_WINDOW_MISSED` branch of `_retire_round_v2` parses the policy (`:7208`). Retiring every such run, on
-  the T3 image, is therefore a precondition of any rollback (Part 9) [H by reading].
+  (`challenge/store.py:1017`), and an expiry that cools its auditor down, opens a re-audit or rearms a job parses
+  the policy (`:8929`, `:8867`, `:9012`). The error then leaves that child's `push_beacon`, and the root forwards
+  pushes to its children in a plain loop (`:959-960`), so the children after it stop getting beacons. No round of
+  such a run can be planned or retired on the old image either: retirement comes only from the reaper, and
+  `_reap_round_v2` parses the policy (`:7423`) before any exit or retirement; the failure is only journaled
+  (`:7331-7336`), and `:7208` is one case behind it. The precondition of a rollback is therefore operational, on
+  the T3 image: every round of every such run closed (finalized or retired), no queued or running
+  `audit_leases_v2` row left, and no new round opened. This is not the `RunRetired` state (`:375-376`), which the
+  old image would not apply to such a run (Part 9) [H by reading].
 
 ## Part 3. Hash neutrality while the fields are absent
 
@@ -428,15 +445,16 @@ digests]
    - `absolute_deadline=min(row["absolute"], now + policy.absolute_rounds())` (`:8611`).
 
 Probe measurement [V], with `hash_consequences.py` (`livrables/forge/2026-10-28_last-merges/bin/`):
-- Only the ASTs of these two owned names move. The unowned edits below (the rearm, the planner, the schema) leave
-  the value unchanged: the probe gives the same value with and without them.
+- Only the ASTs of these two owned names move. The unowned edits below cannot move the value:
+  `implementation_hash` reads only the owned ASTs and twelve paths, none of them `exit_v2.py` or
+  `messages_v2.py`, and the probe gives the same value before and after its rearm edit.
 - `implementation_hash` becomes `d4694fa9…72b4da` under the s100 pin (`avx2`/`sm_103`/`math`, today `24fbe36d…`)
   and `2d500ffa…ef00c3d` under the example pin (`avx2`/`none`, today `7af135ca…`). `sources()` and the bundle move
   too, as after any `src` edit.
 - This is T3 alone, not the train: the train's value is known only when T1 + T2 + T3 are frozen
   (`0017-single-implementation-hash-train.md:77-80`).
 
-### Not owned, hash-neutral, in the same lot
+### Not owned, hash-neutral (the code lot, unless marked "tooling lot")
 
 - `protocol/messages_v2.py`: `max_running_jobs: Positive`, the field `first_window_rounds`, `first_window()`,
   the three `validate_training` rules and `first_window_rounds_for`.
@@ -445,17 +463,18 @@ Probe measurement [V], with `hash_consequences.py` (`livrables/forge/2026-10-28_
   (`:7448-7456`) and `_contest_hold_v2` (`:7680-7688`), and the rearm's `max` in `_rearm_audit_job_v2` (`:9025`).
 - `hypertrain/scripts/ops/live_operator.py`: refuse a gap below `first_window_rounds` when the field is set (next
   to `check_open_shape`, `:130-155`, called at `:213-215`).
-- The D20 builder: lanes, first-window and auditor-count knobs, signed only when set, with their dry-run checks.
-  The runbook's step 7 (`docs/runbooks/intermediate-model-replay.md:264-284`) pops only `reaudit_rounds` and
-  `gap_cap_rounds` today, and asserts that the warm-up has the same training, so the warm-up must list the same
-  auditors as the real run.
-- `test_auditors.sh`: N containers.
+- Tooling lot: the D20 builder's lanes, first-window and auditor-count knobs, signed only when set, with their
+  dry-run checks. The runbook's step 7 (`docs/runbooks/intermediate-model-replay.md:264-284`) pops only
+  `reaudit_rounds` and `gap_cap_rounds` today, and asserts that the warm-up has the same training, so the warm-up
+  must list the same auditors as the real run.
+- Tooling lot: `test_auditors.sh`, N containers.
 - The documentation that states the audit policy or the first window:
   - `hypertrain/docs/network-v2.md:752-755,763-764,805-819,830-831`;
   - `hypertrain/docs/operator.md:265`;
   - `hypertrain/docs/prod-run-signing.md:81-87,104-106`;
-  - `docs/s100-test-stack.md:410-421,425-436`;
-  - `docs/runbooks/intermediate-model-replay.md:26-28,90-92,326-328,389-392`, besides its step 7.
+  - `docs/s100-test-stack.md:410-421,425-444`;
+  - `docs/runbooks/intermediate-model-replay.md:26-28,90-92,326-328,333-338,345-346,389-392`, besides its step 7
+    (tooling lot).
 
 ### Not touched
 
@@ -473,12 +492,12 @@ Probe measurement [V], with `hash_consequences.py` (`livrables/forge/2026-10-28_
 
 - **No shared edited region.** On `dc014508`, T1 edits only `finalize_v2` (`:10872-11042`) [V]. T2 is planned
   in `_service_charge_v2` only (`:5258-5333`; `livrables/forge/2026-10-31_v3-weights-hardening/REPORT.md:257-266`),
-  but it is not written, and its publication of staged rounds in a child store is not designed (ADR 0017 `:568`)
-  [A]. T3 edits the owned `schedule_audits_v2` (`:8276-8432`) and `lease_v2` (`:8434-8632`), and the unowned
-  `_retire_round_v2`, `_reap_round_v2`, `_contest_hold_v2`, `_rearm_audit_job_v2`, `exit_v2.py` and
-  `messages_v2.py` (Part 4); none of them is in T1's or T2's region. With `c9e612b3`'s own commit applied to a copy
-  of `dc014508`, only `finalize_v2`'s AST differs, and `_fresh_v2`, `_result_in_lease_v2`, `lease_v2` and
-  `schedule_audits_v2` are identical [V, this session].
+  but it is not written, and neither is its publication of staged rounds in a child store (ADR 0017 `:568`; the
+  REPORT's caveat, `:264-266`, states only what it must do) [A]. T3 edits the owned `schedule_audits_v2`
+  (`:8276-8432`) and `lease_v2` (`:8434-8632`), and the unowned `_retire_round_v2`, `_reap_round_v2`,
+  `_contest_hold_v2`, `_rearm_audit_job_v2`, `exit_v2.py` and `messages_v2.py` (Part 4); none of them is in T1's
+  or T2's region. With `c9e612b3`'s own commit applied to a copy of `dc014508`, only `finalize_v2`'s AST differs,
+  and `_fresh_v2`, `_result_in_lease_v2`, `lease_v2` and `schedule_audits_v2` are identical [V, this session].
 - **Couplings, without a shared edit.**
   - `finalize_v2` hands each member's `audit_leases_v2.challenge` to the reward ledger (`:10962-10970`). The
     ledger accepts it at the row's `created` (`:2764-2777`). A later `serve_deadline` therefore changes nothing in
@@ -509,7 +528,7 @@ Probe measurement [V], with `hash_consequences.py` (`livrables/forge/2026-10-28_
 
 | Literal | Where (dc014508) | What it does | Classification | Recommendation |
 | --- | --- | --- | --- | --- |
-| (a) `max_running_jobs` 2 (and `max_attempts` 2, `memory_reservation_bytes` 1 GiB) in `round-resource` | `challenge/store.py:5925-5927` (prepared open, w = 0) and `:6020-6022` (generic open, service block), both in owned `open_round_v2` | No code reads these three keys (`:5295-5297`, `:5672-5687`, `:6000-6014`, `:10484-10487` read other keys; `_rollback_snapshot_v2`, `:11970-11976`, only digests the record's bytes) [V]. It is written only for a service-admitted run, which can neither schedule nor lease an audit (503 at `:8353`, `:8535`, `:9536`, `:9950`) [V]. The `:6021` block is not reachable in normal flow (an admitted run stops at `:5700` or `:5970`, or the prepared branch returns at `:5969`) [V by reading]. A one-line mutant at `:5926` or `:6021` moves the hash [V, mutant] | **Stays outside the train** (not edited; no lot of T1-T3 edits `open_round_v2`) | Leave both writes. The record cannot disagree with a running lease, because no lease runs where it is written. If the service heavy gate is ever lifted, that lot must write the signed value or refuse lanes other than 2 at service admission (open question 5). Writing the signed value now would edit owned `open_round_v2` (444 lines, among the largest owned functions) twice, for a key nobody reads |
+| (a) `max_running_jobs` 2 (and `max_attempts` 2, `memory_reservation_bytes` 1 GiB) in `round-resource` | `challenge/store.py:5925-5927` (prepared open, w = 0) and `:6020-6022` (generic open, service block), both in owned `open_round_v2` | No code reads these three keys (`:5295-5297`, `:5672-5687`, `:6000-6014`, `:10484-10487` read other keys; `_rollback_snapshot_v2`, `:11970-11976`, only digests the record's bytes) [V]. It is written only for a service-admitted run, which can neither schedule nor lease an audit (503 at `:8353`, `:8535`, `:9536`, `:9950`) [V]. The `:6021` block is not reachable in normal flow (an admitted run stops at `:5700` or `:5970`, is refused inside the prepared branch, or returns at `:5969`) [V by reading]. A one-line mutant at `:5926` or `:6021` moves the hash [V, mutant] | **Stays outside the train** (not edited; no lot of T1-T3 edits `open_round_v2`) | Leave both writes. The record cannot disagree with a running lease, because no lease runs where it is written. If the service heavy gate is ever lifted, that lot must write the signed value or refuse lanes other than 2 at service admission (open question 6). Writing the signed value now would edit owned `open_round_v2` (444 lines, among the largest owned functions) twice, for a key nobody reads |
 | (b) the literal 4: a PROBATION member alive at `clean_count >= 4` | owned `_unfit_cause_v2` `challenge/store.py:8225`; `challenge/trust_v2.py:135-136` (`live`); `challenge/admission.py:1274` (`eligible`) and a fourth copy at `:1631` (`_standing`, bond release). `trust_v2.py:84` is another 4, the audit-sampling ladder (1,000,000 ppm below 4 clean finalizations) | Eligibility, influence, bond release and audit probability [V]. `trust_v2.py` and `admission.py` are not hashed; the mutant `< 4 -> < 5` at `:8225` moves the hash to `451ecfed…` under the s100 pin [V, mutant] | **Stays outside the train** | Change nothing. It is finding 6's family (admission and trust), not lanes, auditors or first window. If the founder chooses to change it, it needs the train for `:8225` and a coordinated edit of the four copies |
 | (c) the per-miner Q/4 | owned `open_round_v2` `challenge/store.py:5867` (the prepared service open; ADR 0017 `:419-420` and `:457-458` attribute this refusal to `require_roster_v2`, whose Q/4 is only the `1 << 22` at `:5612`) and `:6058-6059` (every generic open, pinned runs included); owned `require_roster_v2` `:5612` (`weight_units` `1 << 22` in the byte-size tape shell); `WeightedEntryV2.weight_units le=Q//4` (`protocol/messages_v2.py:846`); the cohort cap `WeightAllocationV2` (`:862-863`) and `AggregationPolicyV2.miner_cap_units` / `probation_cap_units` `Literal[4194304]` (`:705-706`); `aggregator/weighted_v2.py:78,85,110` | The ceiling of one miner's weight, and of the PROBATION cohort [V]. Mutants at `:5867`, `:6058` and `:5612` move the hash [V, mutant] | **Stays outside the train** (the per-miner part would need it; the cohort cap would not) | Change nothing. Principal SN100 already put the cohort cap and the 12 outside (D159). Finding 6 recommends no change, and T3 needs neither |
 | The service gap 200 | `:5724` (prepared open), `:6017` (service block); `:6025` is the generic `>= 2` | Bounds a service round's `d_final - d_audit` at 200 = `absolute_rounds()` of the tiny profile [V] | **Stays** (not edited) | Keep it. A service run cannot audit, and its first window is `d_final` whatever T3 signs. A service manifest that signs `gap_cap_rounds` above 200 is still capped at 200 there [V by reading] |
@@ -523,25 +542,28 @@ Each lot starts with a test that fails on `dc014508` for the reason named, then 
 assumes the fixture change below is applied first: without it, the network fixture's explicit `max_running_jobs=2`
 meets the override with a `TypeError` (`hypertrain/tests/challenge/test_service_network_v2.py:686,690`) [V].
 
-The probe ran the rows marked "probe" in scratch: 15 tests, of which 11 failed on `dc014508` for the reason named
-and 4 passed as controls; all 15 passed on the probe; ten probe mutants were each killed by the test named [V,
-REPORT]. It did not run the builder knobs, the operator check, `_retire_round_v2`, the `AUDIT_WINDOW_MISSED`
-timing, the builder and service refusals or the re-anchors: the code lot does.
+The probe ran 15 scratch tests: those of the rows marked "probe", the schema part of the `validate_training` row
+with the absent-and-null digest check, and a two-lane control with four auditors (a store-level twin of
+`test_audit.py:99`). 11 failed on `dc014508` (`literal_error`, `extra_forbidden`, `TypeError`, or no `first_window`
+/ `first_window_rounds_for`) and 4 passed as controls; all 15 passed on the probe. Ten probe mutants were each
+killed by the test named (`probe/mutants.txt`) [V]. The probe did not run the builder knobs, the operator check,
+`_retire_round_v2`'s gate (edited, but no probe test runs it), the `AUDIT_WINDOW_MISSED` timing, the builder and
+service refusals, the `validate_training` rule mutants or the re-anchors: the code lot does.
 
 | Behaviour | Test, and the existing file it joins | Fails on `dc014508` because | Mutant it must kill |
 | --- | --- | --- | --- |
 | Lanes = 3 with four listed auditors: three leases run, the fourth auditor gets 204 (probe) | store level with `hypertrain/tests/challenge/audit_lease_fixture_v2.py`, with fresh auditor keys (a first draft of the probe reused the fixture's referee and relay seeds, `test_service_network_v2.py:62-63`) | `literal_error`: 3 is not 2 | `lease_v2` keeps a literal `>= 2` (killed) |
 | Lanes = 1: the second auditor gets 204 (probe) | same, parametrised | `literal_error` | same (killed) |
 | Lanes = 2, as every current policy signs: the third auditor gets 204 | the existing `hypertrain/tests/ledger_invariants/test_audit.py:99` | passes on both (the control) | `aud-lease-store-cap-of-three` (`mutants_audit.py:119`), re-anchored to `>= policy.max_running_jobs`, still killed by `>= 3` |
-| Auditors N: lanes above the listed auditors are refused; 32 lanes with 33 auditors pass, 33 lanes do not (probe) | `hypertrain/tests/protocol/test_network_v2.py` next to `:1255-1309` | `literal_error` | the auditor term dropped; the `max_queued_jobs` term dropped (killed) |
+| Auditors N: lanes above the listed auditors are refused; 32 lanes with 33 auditors pass, 33 lanes do not (probe) | `hypertrain/tests/protocol/test_network_v2.py` next to `:1255-1309` | `literal_error` | the `max_queued_jobs` term dropped (killed in the probe); the auditor term dropped (not among the probe's mutants; a reviewer's rerun killed it) |
 | First window signed (F = 300 at gap 400): the row's `absolute` is `d_audit + 300`; a lease at `d_audit` gets `absolute_deadline = d_audit + 200` (no 409); a lease at `d_audit + 150` gets `lease_expires = d_audit + 250` (probe) | store level, `AUDIT_POLICY_EXTRA` as in `test_audit_reaudit_gap_v2.py:67-70` | `extra_forbidden` | `schedule_audits_v2` keeps `absolute_rounds()`; `lease_v2` drops its `min`, so the lease answers 409 (both killed) |
 | First window absent at gap 400: a lease at `d_audit + 150` is cut at `d_audit + 200` (probe) | same (control) | passes on both | `first_window()` defaulting to `gap_cap()` (killed) |
 | Early exhaustion under F = 400: two executor failures at `d_audit + 5` and `+ 8` rearm the job until `d_audit + 400`; without F, until `d_audit + 208` (probe) | store level, next to the rearm tests of `test_audit_liveness_v2.py:439-535` | `extra_forbidden` (the control passes on both) | the rearm without its `max` (killed) |
 | A member without leaves is dropped at the end of the first window: `d_audit + 200` without F, `d_audit + 400` with F = 400 (probe) | store level, next to `challenge/test_no_show_v2.py:128` | `extra_forbidden` (the control passes on both) | `_expire_leases_v2`'s horizon read as anything but the row's `absolute` (`mutants_audit.py:612`, `mutants_exit_roster.py:156` already cover it at 200) |
 | First window derived: `first_window_rounds_for(5, 2, 229, 100) = 254`, `(5, 3, 229, 100) = 200`, `(5, 1, 229, 100) = 408`; 408 refused under a gap cap of 400 and accepted under 500 (probe) | `test_network_v2.py`, next to the `reaudit_rounds_for` test (`:1315`) | no such function | the two-lease floor dropped; `ceil` turned into `floor` (both killed) |
-| The planner follows: `Schedule.absolute`, `audits_end`, `Wait.AUDIT_WINDOW` and `Wait.DISPUTE` (probe); `AUDIT_WINDOW_MISSED` at `F - 1`; `_retire_round_v2` refusing until `F - 1` | `hypertrain/tests/challenge/test_exit_plan_v2.py` (its `Schedule` at `:13-15` gains the field); `test_retire_round_v2.py:449` | `TypeError` for the planner; `extra_forbidden` for `_retire_round_v2` | `Schedule.absolute` keeps `2·lease_rounds` (killed); `_retire_round_v2` keeps `absolute_rounds()` |
+| The planner follows: `Schedule.absolute`, `audits_end`, `Wait.AUDIT_WINDOW` and `Wait.DISPUTE` (probe); `AUDIT_WINDOW_MISSED` at `F - 1`; `_retire_round_v2` refusing until `F - 1`; `_contest_hold_v2` counting a leaves contest opened before `d_audit + F` | `hypertrain/tests/challenge/test_exit_plan_v2.py` (its `Schedule` at `:13-15` gains the field); `test_retire_round_v2.py:449` | `TypeError` for the planner; `extra_forbidden` for `_retire_round_v2` | `Schedule.absolute` keeps `2·lease_rounds` (killed); `_retire_round_v2` keeps `absolute_rounds()` |
 | Absent fields give today's bytes | the goldens, `test_network_v2.py:1231-1240,1271-1293`, `test_b300_d20_builder.py:701,877`, plus a new "absent, null and set" test in `test_network_v2.py` | the new test fails (`first_window` unknown); the pins pass | `first_window_rounds` always serialised: killed in the probe by four pins, the two `test_network_v2.py` tests and the two manifest goldens, as `scripts/audit_mutants_table.py:408,643` do for the other two optional fields |
-| `validate_training` refusals: lanes other than 2 in production; F < `absolute_rounds()`; F > `gap_cap()`; F present in production; the type refusals (0, `True`, 2.5) | `test_network_v2.py` next to `:1255-1309`; builder and service refusals in `hypertrain/tests/ops/test_manifest_v2.py:343-437` | each test first accepts a value (1, 3 or an F) that `dc014508` refuses; the type refusals alone pass on both | each rule dropped, and `Positive` loosened (one mutant each, in `scripts/audit_mutants_table.py`, as for the gap cap at `:652`, `:666`) |
+| `validate_training` refusals: lanes other than 2 in production; F < `absolute_rounds()`; F > `gap_cap()`; F present in production; the type refusals (0, `True`, 2.5) (probe, schema part) | `test_network_v2.py` next to `:1255-1309`; builder and service refusals in `hypertrain/tests/ops/test_manifest_v2.py:343-437` | each test first accepts a value (1 or 3) that `dc014508` refuses, or calls `first_window()`, which it lacks; the type refusals alone pass on both | each rule dropped, and `Positive` loosened (one mutant each, in `scripts/audit_mutants_table.py`, as for the gap cap at `:652`, `:666`) |
 | The operator tool refuses a round opened at a gap below `first_window_rounds` | `hypertrain/tests/ops/test_live_operator.py` next to `:189-245` | the check does not exist | the check dropped |
 | Builder knobs: unset gives `1dd433fe…` and the `0ef600b4` policy bytes; set moves only `audit_policy_hash` (and the training, for the auditor count); the first window comes from the helper and a measured cycle and is re-checked by the dry run, as `reaudit_rounds_for` is (`build_test_manifest.sh:493`, `:609`); bad values refused before the first stage | `hypertrain/tests/test_b300_d20_builder.py` next to `:701`, `:754`, `:877` | the knobs do not exist | a knob signed while unset |
 
@@ -578,7 +600,7 @@ The figures come from the cited reports and journals. The arithmetic is [H]. Not
 
 | Rounds | What failed | What T3 changes | Conditions |
 | --- | --- | --- | --- |
-| S17d r0 and r1 (`f3901a09`, gap 175 and 200) | Wave 1 was refused 503 inside beacon pauses ("an outage, not WINDOW"), the retries were cut at `d_final`, and 3 of the 5 jobs were never leased (`livrables/forge/2026-10-28_s17-run-101m/s17d/REPORT-S17D.md:5,42-55`) [A] | At gap 175-200 the first window is already `d_final`, so the field changes nothing. From a first lease 12-38 s after `d_audit` (the gap-400 rounds), with a paired cycle of 190-229 s and 0-8 s between waves: 3 lanes give 2 waves in about 392-504 s, 4 lanes about 383-481 s, and 5 lanes one wave in about 202-267 s, against 525 or 600 s [H]. S17d's first leases came at +66 and +114 s (lease expiry minus 100 rounds, `s17d/evidence/round0-leases.txt`): at +66 s, 3 lanes give 446-532 s, over the 525 s of gap 175 [H] | ≥ 3 listed auditors, ≥ 3 executor hosts, audits called at `d_audit`, and no beacon-pause 503 beyond the lease tolerance. Cycles with 3 or more concurrent audits are not measured |
+| S17d r0 and r1 (`f3901a09`, gap 175 and 200) | Wave 1 was refused 503 inside beacon pauses ("an outage, not WINDOW"), the retries were cut at `d_final`, and 3 of the 5 jobs were never leased (`livrables/forge/2026-10-28_s17-run-101m/s17d/REPORT-S17D.md:5,42-55`) [A] | At gap 175-200 the first window is already `d_final`, so the field changes nothing. From a first lease 12-38 s after `d_audit` (the gap-400 rounds), with a paired cycle of 190-229 s and 0-8 s between waves: 3 lanes give 2 waves in about 392-504 s, 4 lanes about 383-481 s, and 5 lanes one wave in about 202-267 s, against 525 or 600 s [H]. S17d's first leases came at +66 and +69 s in round 0 (gap 175) and +114 s in round 1 (gap 200) (lease expiry minus 100 rounds; `s17d/evidence/round0-leases.txt`, `round1-attempts.txt`, `round1-open.txt`): at +66 s, 3 lanes give 446-532 s, over the 525 s of gap 175 [H] | ≥ 3 listed auditors, ≥ 3 executor hosts, audits called at `d_audit`, and no beacon-pause 503 beyond the lease tolerance. Cycles with 3 or more concurrent audits are not measured |
 | S19 (`f3901a09` r2, gap 200) | One wave, lease to complete, takes 195-200 s; three waves 590-620 s against 600 s; 503s on `/lease` idled the auditors 200 and 273 s; 2 MATCH, 3 `AUDIT_INFRASTRUCTURE` (`livrables/forge/2026-10-29_s19-swap-round2/REPORT-S19.md:56,141,192-194,269-279`) [A] | Same as S17d. Since hotfix 2a, a lease is tolerated up to `RESULT_PAUSE_ROUNDS` (50) more rounds behind on a running run without service admission (`challenge/store.py:2605-2643`; `exit_v2.py:31`), so S19's lag (at most 11) would no longer idle the auditors [H by reading] | as above |
 | Gap 400, 4 rounds (`0ef600b4` r0 and r1, `4d84aacc` r0 and r1) | 5/5 MATCH, but only through the rearm. The fifth lease began 439-460 s after `d_audit` by the first watch sample showing it (431-452 s by the sample before), with 140-169 s left to `d_audit + 200`. Lease to complete was 190-229 s for paired audits and 181-206 s for a lone one. The first attempt was cut, with an execute 500 in 3 rounds. MATCH at 793-815 s (finding 3; watch files `settled/s21-evidence/round0-audit-watch.txt`, `settled/s23-round1-evidence/round1-audit-watch.txt`, `S31/evidence/round{0,1}-audit-watch.txt`) [A; the cycles H, sample to sample] | With 3 lanes the fifth audit runs in wave 2 and is done by about 392-504 s, inside the 600 s first window: no cut, no rearm, no 500. With 2 lanes and `first_window_rounds` = 254, the fifth attempt gets a full lease and MATCHes at about 613-666 s (its start plus that round's lone cycle) instead of 793-815 s [H] | 3 lanes need 3 hosts; with 2 hosts the third lane waits for a host with its lease clock running (Part 1.8) |
 | 101 M | Never run | **Nothing.** The lease is 100 rounds (300 s) at H = 4 (`messages_v2.py:733-738`; the builder's H = J = 4, `build_test_manifest.sh:32,380`). The 101 M reference replay took 331.4 and 346.2 s from `exec_attempt` to `exec_published` (`livrables/forge/2026-10-28_s17-run-101m/s17b/REPORT-S17B.md:8-9,43`) [A]. At 31 M an audit's executor time, 131-164 s from `exec_attempt` to `exec_published` (the S20 and S31 executor journals of Part 1.8), is 0.96-1.25 times the 31 M reference of 131.9-136.5 s (`livrables/forge/2026-10-28_s17-run-101m/s17c/REPORT-S17C.md:44-50`) [A; the ratio H]. So a 101 M audit attempt would end with its own lease, whatever the lanes or the window [H] | "Back to the founder", item 2 |
@@ -604,9 +626,9 @@ This record does not edit ADR 0017; the REPORT lists both corrections.
    `AUDIT_INFRASTRUCTURE` attempts and execute 500s.
 3. The wait of a lane for an executor host. Run N lanes on N hosts first; lanes > hosts only to measure that wait.
 4. s100 load as N grows: download and landing (paired +6 s and +3 s medians against alone; n = 24 and 5, two-host
-   data only, computed from the three executor journals in this session [H]),
-   disk reserve per download (`gpu_ops/artifact_transfer.py:385-388`), and beacon lag during N concurrent
-   preparations under the store lock (`challenge/store.py:9306-9565`).
+   data only, computed from the three executor journals in this session [H]), disk reserve per download
+   (`gpu_ops/artifact_transfer.py:385-388`), and beacon lag during N concurrent preparations under the store lock
+   (`challenge/store.py:9306-9565`).
 5. At gap 400 with two lanes, `first_window_rounds` from `first_window_rounds_for` against the same build
    without it.
 6. Production keeps 2 lanes and a first window of `absolute_rounds()` (2.5) until these measures exist.
@@ -618,16 +640,17 @@ This record does not edit ADR 0017; the REPORT lists both corrections.
 - **Golden constant:** `IMPLEMENTATION_HASH` of `test_run_0ef600b4_golden.py:23`, once, on the integration
   branch. The run ids and policy hashes of `f3901a09`, `0ef600b4`, `4d84aacc` and the example do not move
   (Part 3).
-- **Lots:** one T3 code lot (schema, store, planner, tests and mutants; to estimate) and one hash-neutral tooling
-  lot (builder knobs, auditor count, `test_auditors.sh`, runbook and docs; to estimate). No file gives a duration
+- **Lots:** one T3 code lot (schema, store, planner, the operator tool's gap refusal, the documentation of the
+  window, tests and mutants; to estimate) and one hash-neutral tooling lot (the D20 builder's knobs and auditor
+  count, `test_auditors.sh`, the runbook's step 7; to estimate), as Part 4 marks them. No file gives a duration
   for either. Then Lens on each, the integration branch, and the image cycle (push to attested images took 29-48
   min in the last three CI runs, `0017-single-implementation-hash-train.md:625-627`) [A].
 - **Images:** a server image only. The auditors and the GPU image need nothing for T3 (Part 2.6). A run that signs
   the new fields needs the T3 server image before it is built.
 - **Rollback:** the image to return to stays `3bb5db0f…` (ADR 0017 `:641-646`). T3 adds no table and no record
   kind. A run that signs the new fields cannot be served by an older image, and while it has an audit in flight
-  it would stop the beacon forwarding to the child stores after it (2.6). Retiring every such run, on the T3
-  image, is a precondition of a rollback [H by reading].
+  it would stop the beacon forwarding to the child stores after it (2.6). Closing every round of every such run,
+  on the T3 image (2.6), is a precondition of a rollback [H by reading].
 - **What a production ledger keeps:** two lanes, `absolute_rounds()` (200 rounds at H ≤ 30) as the first window,
   and the gap cap of 200, until a TEST run measures the new geometry (2.5, Part 8). TEST runs need ≥ N listed
   auditors, N auditor containers and N executor hosts for N lanes, and D156 holds node loans until F14
@@ -648,23 +671,25 @@ For Lens:
    Recommendation: yes, with the planner test of Part 7 asserting `DISPUTE`.
 4. Should the `audit-reservation` record list all auditors? Recommendation: no. It is unread, and its bytes enter
    the rollback digest of every later round of a pinned run.
+5. Should the operator tool refuse, or only warn, when a round is opened at a gap below `first_window_rounds`?
+   Recommendation: refuse. F is the time the planned audits need from `d_audit`; a narrower gap ends the first
+   window at `d_final`, before F, without a word. A gap of exactly F leaves no rearm either, so the runbook asks
+   for F plus the wanted rearm room (146 rounds at F = 254 and a gap of 400).
 
 For Principal SN100:
 
-5. Classification of D159 (a): leave the `round-resource` literals, and require whichever lot lifts the service
+6. Classification of D159 (a): leave the `round-resource` literals, and require whichever lot lifts the service
    heavy gate to reconcile them. Recommendation: yes (Part 6).
-6. Should the lanes and the first window be TEST-only for now (2.5)? Recommendation: yes. It is fail-closed, and
-   it can be lifted later in `messages_v2.py` without a hash move.
-7. Which measure lifts the TEST-only rule for production lanes? Recommendation: a TEST run at gap 200 with 3 lanes
+7. Should the lanes and the first window be TEST-only for now (2.5)? Recommendation: yes. It is fail-closed, and
+   it can be lifted later without a hash move: in `messages_v2.py` for the lanes, and also in the operator tool's
+   gap-cap check for a first window above 200 (2.5).
+8. Which measure lifts the TEST-only rule for production lanes? Recommendation: a TEST run at gap 200 with 3 lanes
    on 3 hosts, five members, two rounds, last MATCH under 540 s (60 s of slack before 600 s) and no rearm.
    The thresholds are proposed here; no file holds them.
-8. Should the first window go into T3, or only the lanes? Recommendation: both. With three lanes the window is not
+9. Should the first window go into T3, or only the lanes? Recommendation: both. With three lanes the window is not
    needed at 31 M (2.4), but two hosts is what TEST has had. The window costs two owned expressions
    (`schedule_audits_v2` `:8382` and the per-lease `min` in `lease_v2` `:8611`), the unowned copies of Part 4, and
    no hash beyond the train's. It also delays the rounds whose jobs resolve only at its end (2.4).
-9. (Lens) Should the operator tool refuse, or only warn, when a round is opened at a gap below
-   `first_window_rounds`? Recommendation: refuse. The publisher derived F for that gap, and a narrower one
-   silently gives the first window `d_final` and no rearm (2.4).
 
 ## Back to the founder
 
@@ -709,8 +734,8 @@ outside lanes / auditors / first window. Two limits are outside T3's scope, and 
   audit would wait to `d_audit + 200`, then be rearmed. It would MATCH about when it does today (781-831 s against
   793-815 s) [H]: no gain in time, and the rule would change pinned runs.
 - **Writing the signed lane count into `round-resource`** (D159 (a), option a1): Part 6.
-- **Leaving the rearm as it is** (`min(now + absolute_rounds(), commit.exp_drand)`). Under a signed window, a job
-  exhausted early would be rearmed short of its first window (2.4).
+- **Leaving the rearm as it is** (`min(now + policy.absolute_rounds(), sealed.exp_drand)`, `:9025`). Under a
+  signed window, a job exhausted early would be rearmed short of its first window (2.4).
 
 ## Not verified
 
@@ -721,6 +746,7 @@ outside lanes / auditors / first window. Two limits are outside T3's scope, and 
   `-s31.json`) are not in Git.
 - 4d84aacc has no fixture in Git. Its policy is taken as `0ef600b4`'s from S31's printed evidence.
 - The 101 M audit time is an estimate from the reference replay. No 101 M audit has run.
-- The operator-tool check, the builder knobs and `_retire_round_v2`'s gate under a signed window are designed, not
-  probed.
+- `_retire_round_v2`'s gate is edited in the probe, but no probe test runs it. The operator-tool check, the
+  builder knobs, the builder and service refusals, the planner's `AUDIT_WINDOW_MISSED` branch
+  (`exit_v2.py:284`) and the `validate_training` rule mutants are designed, not probed.
 - Nothing ran on s100, a node, a GPU, R2 or on-chain.
