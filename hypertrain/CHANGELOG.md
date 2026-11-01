@@ -421,12 +421,14 @@
   MAX_LAG_ROUNDS`, and the ledger still refuses a Finalize expired at that round. A first
   aggregate keeps the 2-round view: it judges its members at the gate's round, whose beacon must
   have been pushed. On the hash train (ADR 0017, T1) the finalize's gate is judged once, before
-  its replay, with the Finalize's expiry at the round the gate judges, so a replay that keeps the
-  pusher out longer than the cap no longer answers 503; the round is closed, its rewards vest
-  and the ledger accepts the Finalize at the round a healthy view holds when the replay ends, not
-  at the gate's round; a round already finalized is answered without it. That changes
-  `finalize_v2`, so `implementation_hash` moves (24fbe36d... -> 8235e5f5... for the gate alone);
-  no manifest, run id, policy hash or wire format changes.
+  its replay and after the Finalize is authenticated (a Finalize whose signature, signer or type
+  fails is refused as such, never paused), with the Finalize's expiry at the round the gate
+  judges, and its pin is written with the round, so a refused finalize still writes nothing. A
+  replay that keeps the pusher out longer than the cap no longer answers 503; the round is
+  closed, its rewards vest and the ledger accepts the Finalize at the round a healthy view holds
+  when the replay ends, not at the gate's round; a round already finalized is answered without
+  it. That changes `finalize_v2`, so `implementation_hash` moves (24fbe36d... -> 8235e5f5... for
+  the gate alone); no manifest, run id, policy hash or wire format changes.
 - `GET /internal/v1/get_weights` no longer answers 409 `RUN_MANIFEST_RETIRED` for the whole state
   directory when one hosted run has a stored manifest the model now refuses (S21, run 0ef600b4: the
   stale TEST runs 2a7d7702 and fea7e44f lacked the env pin, so the settled round 0 could not be

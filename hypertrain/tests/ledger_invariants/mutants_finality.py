@@ -324,17 +324,10 @@ MUTANTS = [
         [FINALIZE_MATRIX],
         "A Finalize that omits or adds a miner is accepted as the audited set.",
     ),
-    mutant(
-        "finalize-accepts-any-signer",
-        ["FIN-01"],
-        STORE,
-        'model = self._authenticated_v2(run_id, raw, "Finalize", manifest.training.coord_pubkey)',
-        "model = self._authenticated_v2(\n"
-        '                run_id, raw, "Finalize", envelope_v2.parse_envelope(raw).signer\n'
-        "            )",
-        [FINALIZE_MATRIX],
-        "A Finalize signed by a miner or an auditor settles the round.",
-    ),
+    # finalize-accepts-any-signer is gone (ADR 0017 T1): the entry transaction of finalize_v2 checks
+    # the same coordinator signer first, so a miner's Finalize is refused by two guards and no
+    # single mutant of the settling one settles it (README); the entry's own mutant is
+    # exp-finalize-gate-before-its-authentication, and FINALIZE_MATRIX still pins the refusal.
     mutant(
         "finalize-settles-without-the-settle-gate",
         ["FIN-02"],
