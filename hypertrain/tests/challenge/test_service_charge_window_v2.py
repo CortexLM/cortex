@@ -48,7 +48,7 @@ network = fixture.network
 tiny = fixture.tiny
 
 WAIT = 10  # seconds: far above a charge that does not wait, far below a test timeout
-# Both window tests stay strict xfails until the hash moves (Principal SN100 D128).
+# The window tests stay strict xfails until the hash moves (Principal SN100 D128).
 WINDOW_IS_A_REFUSAL = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
@@ -237,10 +237,142 @@ def test_a_genesis_charge_during_a_beacon_push_of_its_store_waits_and_is_granted
             charger.join(WAIT)
     assert not pusher.is_alive() and not charger.is_alive()
     assert pushed == [{"round": number, "latest": number}]
-    # Once the push committed, the attempt is granted and debited once.
+    # Once the push committed, the attempt is granted and debited once, as uncontended.
     assert charged == [True]
     identity = sha256_hex(canonicalize({"w": -1, "operation": "genesis", "attempt": 1}))
-    assert [row[0] for row in charges(store, run_id)] == [identity]
+    assert charges(store, run_id) == [
+        (
+            identity,
+            {
+                "w": -1,
+                "operation": "genesis",
+                "attempt": 1,
+                "kind": "outer",
+                "units": units,
+                "profile_hash": store._service_admission_v2(run_id)[1],
+            },
+        )
+    ]
+
+
+@WINDOW_IS_A_REFUSAL
+def test_a_charge_during_a_forwarded_push_waits_and_the_round_forwarded_meanwhile_is_written(
+    hosted, monkeypatch
+):
+    """The hosted side of the D128 case: the root forwards each round to its children
+    (`push_beacon(wait=False)`), and a child's push holds that store's lock and transaction. A
+    round forwarded while the charge holds the lock is staged: it is written when the charge
+    ends, as when an outermost `_tx` ends."""
+    # Given: the pusher inside the child's push transaction of the next round, held in `_advance`,
+    # and the charge held where it writes its record, both released by this thread.
+    root, child, manifest = hosted
+    run_id = manifest.run_id()
+    units = outer_units(child, run_id)
+    in_push, release_push = threading.Event(), threading.Event()
+    in_charge, release_charge = threading.Event(), threading.Event()
+    advance, put = child._advance, child._put_record_v2
+
+    def held_advance(db: Any) -> Any:
+        if not in_push.is_set():
+            in_push.set()
+            release_push.wait(WAIT)
+        return advance(db)
+
+    def held_put(run: str, kind: str, identity: str, data: Any) -> None:
+        if kind == "service-charge":
+            in_charge.set()
+            release_charge.wait(WAIT)
+        put(run, kind, identity, data)
+
+    monkeypatch.setattr(child, "_advance", held_advance)
+    monkeypatch.setattr(child, "_put_record_v2", held_put)
+    first = root._now(root._db) + 1
+    pusher, pushed = in_thread(root.push_beacon, fixture.service.fixture_beacon(first))
+    charger: threading.Thread | None = None
+    try:
+        # Controls fail as such, not as the expected AssertionError of the strict xfail.
+        if not in_push.wait(WAIT):
+            pytest.fail(f"the forwarded push never reached its transaction: {pushed!r}")
+        if not child._db.in_transaction:
+            pytest.fail("the child's push transaction is not open")
+        # When: the capacity charge of round 0 lands in it, from another thread.
+        charger, charged = in_thread(
+            child._service_charge_v2, run_id, 0, "outer", 1, kind="outer", units=units
+        )
+        charger.join(WAIT / 5)
+        # Then: it is not refused; it waits for the transaction it does not own.
+        assert charged == [] and charger.is_alive(), f"the charge did not wait: {charged!r}"
+        release_push.set()
+        pusher.join(WAIT)
+        if not in_charge.wait(WAIT):
+            pytest.fail(f"the charge never reached its record: {charged!r}")
+        # And: a round forwarded while the charge holds the lock is staged, not written.
+        second = first + 1
+        root.push_beacon(fixture.service.fixture_beacon(second))
+        if second not in child._staged_beacons:
+            pytest.fail("the round forwarded during the charge was not staged")
+    finally:
+        release_push.set()
+        release_charge.set()
+        pusher.join(WAIT)
+        if charger is not None:
+            charger.join(WAIT)
+    assert not pusher.is_alive() and not charger.is_alive()
+    assert pushed == [{"round": first, "latest": first}]
+    # The attempt is granted and debited once, as uncontended, and the charge wrote the staged
+    # round when it ended.
+    assert charged == [True]
+    assert charges(child, run_id) == [outer_charge(child, run_id, units)]
+    assert child._now(child._db) == second and not child._staged_beacons
+
+
+@WINDOW_IS_A_REFUSAL
+def test_a_charge_behind_a_lock_holder_checks_its_deadline_with_the_round_staged_meanwhile(hosted):
+    """A request that holds the store lock around its transaction (`create_run_v2`,
+    `_aggregate_flight_v2`) writes no staged round when it ends: its `_tx` is not outermost. A
+    round forwarded meanwhile stays staged until the next outermost holder writes it; the charge
+    that waited for the lock is that holder, so its deadline check sees the round."""
+    # Given: a thread holding the child's lock around a transaction, and the first round past the
+    # reservation deadline forwarded meanwhile, so staged.
+    root, child, manifest = hosted
+    run_id = manifest.run_id()
+    units = outer_units(child, run_id)
+    late = int(child._record_v2(run_id, "round-resource", "0")["deadline"]) + 1
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with child._lock, child._tx():
+            holding.set()
+            release.wait(WAIT)
+
+    holder, held = in_thread(hold)
+    charger: threading.Thread | None = None
+    try:
+        # Controls fail as such, not as the expected AssertionError of the strict xfail.
+        if not holding.wait(WAIT):
+            pytest.fail(f"the holder never opened its transaction: {held!r}")
+        root.push_beacon(fixture.service.fixture_beacon(late))
+        if late not in child._staged_beacons:
+            pytest.fail("the round past the deadline was not staged")
+        # When: the capacity charge of round 0 lands behind the holder, from another thread.
+        charger, charged = in_thread(
+            child._service_charge_v2, run_id, 0, "outer", 1, kind="outer", units=units
+        )
+        charger.join(WAIT / 5)
+        # Then: it is not refused for the transaction; it waits for the lock.
+        assert charged == [] and charger.is_alive(), f"the charge did not wait: {charged!r}"
+    finally:
+        release.set()
+        holder.join(WAIT)
+        if charger is not None:
+            charger.join(WAIT)
+    assert not holder.is_alive() and not charger.is_alive()
+    assert held == [None]
+    # The staged round is written before the deadline check: refused, nothing debited.
+    refused = [(e.status, e.detail) if isinstance(e, ChallengeError) else e for e in charged]
+    assert refused == [(409, "SERVICE_RESOURCE_DEADLINE")]
+    assert charges(child, run_id) == []
+    assert child._now(child._db) == late and not child._staged_beacons
 
 
 def test_a_charge_made_inside_its_own_open_transaction_is_still_refused(hosted):
