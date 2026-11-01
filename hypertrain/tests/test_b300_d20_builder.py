@@ -44,6 +44,7 @@ from hypertrain.protocol.messages_v2 import (
     EconomicsPolicyV2,
     PartIndexV1,
     RunManifestV2,
+    first_window_rounds_for,
     reaudit_rounds_for,
 )
 from hypertrain.trainer.config import ModelConfig
@@ -756,6 +757,212 @@ def test_an_audit_gap_the_run_cannot_take_is_refused_and_leaves_nothing(
 ):
     out = tmp_path / "out"
     dense = {"HT_D20_GEOMETRY": "dense-0.03b", "HT_D20_REPLAY_SECONDS": "133"}
+
+    run = build(host, out, driver="595.91.07", sm_count="148", env={**dense, **env})
+
+    assert run.returncode != 0 and named in run.stderr
+    assert not out.exists() and uv_calls(host) == stages
+
+
+def dry_run_report(run: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert isinstance(report, dict)
+    return report
+
+
+def copy_seeds(source: Path, target: Path) -> None:
+    """Pre-stage the seeds of one build in another OUT_DIR, as the runbook does for its builds."""
+    (target / "secrets").mkdir(parents=True, mode=0o700)
+    for seed in seed_files(source / "secrets"):
+        shutil.copy(seed, target / "secrets" / seed.name)
+
+
+def test_without_the_lane_knobs_a_build_lists_two_auditors_and_signs_two_lanes(host, tmp_path):
+    # ADR 0018: the knobs are signed only when set; the dry run says what the run needs.
+    out = tmp_path / "out"
+
+    run = build(host, out)
+
+    assert run.returncode == 0, run.stderr
+    manifest, audit = accepted_manifest(out)
+    assert (len(manifest.training.auditors), audit.max_running_jobs) == (2, 2)
+    assert "first_window_rounds" not in (out / "inputs/policies.json").read_text()
+    report = dry_run_report(run)
+    assert report["audit_lanes"] == {
+        "auditors": 2,
+        "max_running_jobs": 2,
+        "first_window_rounds": None,
+        "first_window": None,
+        "requires": None,
+    }
+    assert report["checks"]["listed_auditors"] and report["checks"]["audit_lanes_of_the_knob"]
+    assert report["checks"]["first_window_of_the_cycle"]
+
+
+@pytest.mark.parametrize(
+    ("auditors", "lanes"), [("2", "1"), ("3", "3")], ids=["one_lane", "three_lanes_three_auditors"]
+)
+def test_the_lane_knobs_sign_the_lanes_and_list_the_auditors_and_nothing_else(
+    host, tmp_path, auditors, lanes
+):
+    # Against the build without them (same seeds, image and expiry): the audit policy signs the
+    # lanes, the training lists the auditors (a third one is a new seed), and only the audit
+    # policy hash and, with a third auditor, the training move; a production ledger refuses it.
+    args = {"exp_round": "34310319"}
+    plain, knobbed = tmp_path / "plain", tmp_path / "knob"
+    first = build(host, plain, **args)
+    assert first.returncode == 0, first.stderr
+    copy_seeds(plain, knobbed)
+    env = {"HT_D20_AUDITORS": auditors, "HT_D20_AUDIT_LANES": lanes}
+
+    run = build(host, knobbed, env=env, **args)
+
+    assert run.returncode == 0, run.stderr
+    manifest, audit = accepted_manifest(knobbed)
+    assert audit.max_running_jobs == int(lanes)
+    keys = json.loads((knobbed / "inputs/public-keys.json").read_bytes())
+    assert manifest.training.auditors == [keys[f"auditor-{i}"] for i in range(int(auditors))]
+    policies = [json.loads((out / "inputs/policies.json").read_bytes()) for out in (plain, knobbed)]
+    assert policies[1]["audit"].pop("max_running_jobs") == int(lanes)
+    assert policies[0]["audit"].pop("max_running_jobs") == 2
+    assert policies[0] == policies[1]
+    manifests = [json.loads((out / "out/manifest.json").read_bytes()) for out in (plain, knobbed)]
+    trainings = [{k: v for k, v in m["training"].items() if k != "auditors"} for m in manifests]
+    assert trainings[0] == trainings[1]
+    assert manifests[1]["training"]["auditors"][:2] == manifests[0]["training"]["auditors"]
+    networks = [m["network"] for m in manifests]
+    assert {k for k in networks[0] if networks[0][k] != networks[1][k]} == {"audit_policy_hash"}
+    report = dry_run_report(run)
+    assert "server image that holds ADR 0018" in report["audit_lanes"].pop("requires")
+    assert report["audit_lanes"] == {
+        "auditors": int(auditors),
+        "max_running_jobs": int(lanes),
+        "first_window_rounds": None,
+        "first_window": None,
+    }
+    assert all(report["checks"].values())
+    scratch = tmp_path / "production"
+    scratch.mkdir()
+    production = production_build(knobbed, scratch)
+    assert production.returncode == 2 and not (scratch / "out").exists()
+    assert "audit lanes other than 2 or a first window are for a TEST manifest" in (
+        production.stderr
+    )
+
+
+FIRST_WINDOW = {
+    "HT_D20_AUDIT_GAP_ROUNDS": "400",
+    "HT_D20_AUDIT_CYCLE_SECONDS": "229",
+    "HT_D20_AUDIT_ROSTER": "5",
+}
+
+
+@pytest.mark.parametrize(
+    ("auditors", "lanes", "hosts", "parallel", "window"),
+    [("2", "", "2", 2, 254), ("3", "3", "3", 3, 200), ("3", "3", "2", 2, 254)],
+    ids=["two_lanes", "three_lanes_on_three_hosts", "three_lanes_on_two_hosts"],
+)
+def test_the_first_window_knobs_sign_the_window_of_the_measured_cycle(
+    host, tmp_path, auditors, lanes, hosts, parallel, window
+):
+    # ADR 0018 Part 2.4 (the 31 M run at gap 400): five audits on the lanes the run really has (the
+    # least of the lanes, the auditors and the hosts) at the measured 229 s cycle. The warm-up is
+    # built with the same auditors, so the training is the same and only the audit policy differs.
+    same = {"HT_D20_AUDITORS": auditors}
+    knobs = {**same, **FIRST_WINDOW, "HT_D20_AUDIT_HOSTS": hosts}
+    if lanes:
+        knobs["HT_D20_AUDIT_LANES"] = lanes
+
+    _, real, _, second = two_builds(host, tmp_path, "133", "dense-0.03b", knobs, same)
+
+    assert second.returncode == 0, second.stderr
+    _, audit = accepted_manifest(real)
+    assert audit.first_window_rounds == window == first_window_rounds_for(5, parallel, 229, 100)
+    assert (audit.gap_cap_rounds, audit.max_running_jobs) == (400, int(lanes or 2))
+    report = dry_run_report(second)
+    assert report["audit_lanes"]["first_window"] == {
+        "audits": 5,
+        "parallel": parallel,
+        "cycle_seconds": 229,
+        "gap_cap": 400,
+    }
+    assert report["audit_lanes"]["first_window_rounds"] == window
+    assert all(report["checks"].values())
+    assert report["checks"]["warmup_same_training"]
+    assert report["checks"]["warmup_differs_only_by_the_audit_policy"]
+
+
+def test_a_warm_up_that_lists_other_auditors_did_not_measure_the_run(host, tmp_path):
+    # A third auditor is a new training: a warm-up built without it is another run, so the dry run
+    # of the real build refuses it, as for any training that is not the warm-up's.
+    knobs = {"HT_D20_AUDITORS": "3", "HT_D20_AUDIT_LANES": "3"}
+
+    _, real, _, second = two_builds(host, tmp_path, "133", "dense-0.03b", knobs)
+
+    assert second.returncode == 1 and "DRY-RUN VALIDATION FAILED" in second.stderr
+    checks = dry_run_report(second)["checks"]
+    assert checks["listed_auditors"] and not checks["warmup_same_training"]
+    assert not any((real / d).exists() for d in ("inputs", "out", "state"))
+
+
+@pytest.mark.parametrize(
+    ("env", "named", "stages"),
+    [
+        ({"HT_D20_AUDITORS": "1"}, "HT_D20_AUDITORS must be 2..9", 0),
+        ({"HT_D20_AUDITORS": "10"}, "HT_D20_AUDITORS must be 2..9", 0),
+        ({"HT_D20_AUDIT_LANES": "0"}, "HT_D20_AUDIT_LANES must be 1..9", 0),
+        ({"HT_D20_AUDIT_LANES": "-3"}, "HT_D20_AUDIT_LANES must be 1..9", 0),
+        (
+            {**FIRST_WINDOW, "HT_D20_AUDIT_HOSTS": "02"},
+            "HT_D20_AUDIT_HOSTS must be a whole number from 1",
+            0,
+        ),
+        (
+            {**FIRST_WINDOW, "HT_D20_AUDIT_ROSTER": ""},
+            "go together: the first window needs all three",
+            0,
+        ),
+        (
+            {
+                **FIRST_WINDOW,
+                "HT_D20_AUDIT_GAP_ROUNDS": "",
+                "HT_D20_AUDIT_HOSTS": "2",
+                "HT_D20_GEOMETRY": "tiny-cpu",
+            },
+            "are read by dense-0.1b, dense-0.05b and dense-0.03b only",
+            0,
+        ),
+        (
+            {"HT_D20_AUDIT_LANES": "3"},
+            "HT_D20_AUDIT_LANES=3 is above HT_D20_AUDITORS=2",
+            1,
+        ),
+        # 133 s needs no wider gap than 200 rounds: 254 rounds of window do not fit the cap
+        (
+            {**FIRST_WINDOW, "HT_D20_AUDIT_GAP_ROUNDS": "", "HT_D20_AUDIT_HOSTS": "2"},
+            "254 rounds, above the gap cap of 200: raise HT_D20_AUDIT_GAP_ROUNDS to at least 254",
+            1,
+        ),
+    ],
+    ids=[
+        "one_auditor",
+        "ten_auditors",
+        "zero_lanes",
+        "negative_lanes",
+        "hosts_leading_zero",
+        "window_without_roster",
+        "window_on_another_geometry",
+        "lanes_above_auditors",
+        "window_above_the_gap_cap",
+    ],
+)
+def test_a_lane_or_window_knob_the_run_cannot_take_is_refused_and_leaves_nothing(
+    host, tmp_path, env, named, stages
+):
+    out = tmp_path / "out"
+    dense = {"HT_D20_GEOMETRY": "dense-0.03b", "HT_D20_REPLAY_SECONDS": "133"}
+    if env.get("HT_D20_GEOMETRY") == "tiny-cpu":
+        dense = {"HT_D20_REPLAY_SECONDS": ""}
 
     run = build(host, out, driver="595.91.07", sm_count="148", env={**dense, **env})
 
