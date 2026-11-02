@@ -227,6 +227,9 @@ LANE_KNOBS = BUILDS + "test_the_lane_knobs_sign_the_lanes_and_list_the_auditors_
 WINDOW_KNOBS = BUILDS + "test_the_first_window_knobs_sign_the_window_of_the_measured_cycle"
 OTHER_AUDITORS = BUILDS + "test_a_warm_up_that_lists_other_auditors_did_not_measure_the_run"
 BAD_KNOBS = BUILDS + "test_a_lane_or_window_knob_the_run_cannot_take_is_refused_and_leaves_nothing"
+WARM_UP_WINDOW = (
+    BUILDS + "test_with_the_lane_or_window_knobs_the_warm_up_check_still_refuses_the_warm_up_window"
+)
 LANE_TERMS = "            self.max_queued_jobs, len(set(training.auditors))\n"
 WINDOW_RANGE_T3 = (
     "            self.absolute_rounds() <= self.first_window_rounds <= self.gap_cap()\n"
@@ -1009,5 +1012,12 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "    if window > cap:\n",
         "    if False:\n",
         (BAD_KNOBS + "[window_above_the_gap_cap]",),
+    ),
+    (
+        "the warm-up check compares the knobbed audit policy: a 299 s build passes it",
+        BUILDER_SH,
+        '    checks[differs] = window_only.digest() != theirs["audit_policy_hash"] and {\n',
+        '    checks[differs] = mine["audit_policy_hash"] != theirs["audit_policy_hash"] and {\n',
+        (WARM_UP_WINDOW + "[lane_knob]", WARM_UP_WINDOW + "[window_knobs]"),
     ),
 )

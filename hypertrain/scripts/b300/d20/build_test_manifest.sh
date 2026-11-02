@@ -701,7 +701,10 @@ if warmup:
             update={"artifact_limits": bare}
         ).digest()
         differs += "_and_the_artifact_limits"
-    checks[differs] = mine["audit_policy_hash"] != theirs["audit_policy_hash"] and {
+    # The lane and window knobs (ADR 0018) sign the audit policy too: without them it must still
+    # differ from the warm-up's (the measured replay's window), or the warm-up measured this run.
+    window_only = audit.model_copy(update={"max_running_jobs": 2, "first_window_rounds": None})
+    checks[differs] = window_only.digest() != theirs["audit_policy_hash"] and {
         k: v for k, v in mine.items() if k != "audit_policy_hash"
     } == {k: v for k, v in theirs.items() if k != "audit_policy_hash"}
 spec = registry.specs[0]
