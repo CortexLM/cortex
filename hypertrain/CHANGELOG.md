@@ -92,6 +92,16 @@
   ledger: they are TEST knobs because the builder signs a test ledger only. Without the variables
   the build is unchanged: the rebuild of run `0ef600b4` from its S20 inputs gives the same run id
   and byte-identical inputs, policies and manifest.
+- `HT_D20_AUDITORS=N` (2..9, default 2) and `HT_D20_AUDIT_LANES=L` (1..9) of
+  `scripts/b300/d20/build_test_manifest.sh`, read by every geometry, and, together,
+  `HT_D20_AUDIT_CYCLE_SECONDS`, `HT_D20_AUDIT_ROSTER` and `HT_D20_AUDIT_HOSTS`, read by the measured
+  geometries (ADR 0018, tooling lot): the build lists N auditors, the audit policy signs
+  `max_running_jobs = L` and `first_window_rounds = first_window_rounds_for(roster, min(L, N, hosts),
+  cycle, 100)`. L above N and a window above the gap cap are refused by the first stage (exit 1,
+  nothing left); the dry run recomputes both and prints `audit_lanes` with what such a run needs (as
+  many polling auditors and executor hosts as lanes, a server image that holds ADR 0018). Only
+  `audit_policy_hash` moves, and the training with N; a warm-up lists the same auditors. Without the
+  variables the build is unchanged (the f3901a09 and 0ef600b4 shape pins).
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a
@@ -380,6 +390,18 @@
   `4 * lease_rounds + reaudit_rounds`, and a production manifest that does is refused by the builder and by
   the master when the run is created (`AuditPolicyV2.validate_training(..., ledger_mode=)`). See
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
+- The audit lanes and the first audit window are read from the signed audit policy (ADR 0018, T3 of
+  the hash train). `AuditPolicyV2.max_running_jobs` is `Positive` instead of `Literal[2]` (2
+  serialises as before) and `lease_v2` answers 204 at that many running leases instead of a literal
+  2; the schema takes any positive value, `validate_training` caps it above 2 at the least of 32 and
+  the distinct listed auditors. The optional `first_window_rounds` (omitted when absent: no digest or
+  run id moves) sets `first_window()`, by default `absolute_rounds()`, between two leases and
+  `gap_cap()`: `schedule_audits_v2`, the exit planner (`Schedule.absolute`, `audits_end`), the
+  reaper, the contest hold and the retirement gate read it; each lease keeps `AuditJobV2`'s two-lease
+  bound, and a rearm never ends before the job's first window. Both are refused outside a TEST
+  ledger, and `live_operator.py open` refuses a gap below a signed window. `schedule_audits_v2` and
+  `lease_v2` are owned: `implementation_hash` moves (24fbe36d... -> d4694fa9... under the s100 pin,
+  for T3 alone); no pinned manifest, run id or policy hash changes.
 
 ### Fixed
 - A restarted master witnesses the beacon pauses of its runs again (TEST 31/10, runs 0ef600b4 and
