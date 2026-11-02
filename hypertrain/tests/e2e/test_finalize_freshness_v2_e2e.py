@@ -220,14 +220,9 @@ def test_an_unauthenticated_finalize_is_refused_before_its_gate_and_writes_nothi
     assert replays == [] and written(network) == before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="remaining 503 of the hash-neutral lot: finalize_v2 judges its gate after its replay, "
-    "so a replay that keeps the pusher out longer than RESULT_PAUSE_ROUNDS (150 s) is refused; "
-    "the gate at entry moves the implementation hash (branch hotfix-finalize-entry-gate)",
-)
 def test_a_finalize_whose_own_replay_outlasts_the_cap_settles(audited, monkeypatch):
+    # The remaining 503 of the hash-neutral lot, settled by the gate at entry (hash train,
+    # ADR 0017 T1). It settles round 0; the next tests play rounds 1 and 2 in this order.
     network = audited
     view = network.now
     applied = aggregated(network, view)
@@ -235,7 +230,7 @@ def test_a_finalize_whose_own_replay_outlasts_the_cap_settles(audited, monkeypat
     replays = slow_replays(network, monkeypatch, to=view + CAP + 1)
     settled = finalize(network, applied)
     assert replays == [0]
-    assert settled.status_code == 200, settled.text  # today: 503 "beacon infrastructure paused"
+    assert settled.status_code == 200, settled.text  # was 503 "beacon infrastructure paused"
 
 
 def test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_the_round_it_ends(
