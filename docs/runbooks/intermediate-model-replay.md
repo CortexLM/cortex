@@ -124,17 +124,21 @@ has run with them [A, ADR 0018].
 **Images.** The challenge serves the signed bounds in every `JoinChallenge` (`challenge/admission.py`), and code
 before `bc306dc` refuses the two fields (`extra_forbidden`): a run built with a knob needs its server image and the
 GPU image its miners and references run built from `bc306dc` or later [V on the `667695be` source:
-`extra_forbidden`; GPU `cb52fe37` is built from `667695be` [A], forge journal 2026-10-29 21:13Z]. A run that signs lanes other
-than 2 or a first window needs a server image that holds ADR 0018: older code refuses its audit policy
-(`literal_error`, `extra_forbidden`); the auditor, miner and GPU images never parse it [V by reading, ADR 0018 Part
-2.6].
-`implementation_hash` does not tell those images apart.
+`extra_forbidden`; GPU `cb52fe37` is built from `667695be` [A], forge journal 2026-10-29 21:13Z].
+`implementation_hash` does not tell those images apart. A run that signs lanes other than 2 or a first window needs
+a server image that holds ADR 0018: older code refuses its audit policy (`literal_error`, `extra_forbidden`); the
+auditor, miner and GPU images never parse it [V by reading, ADR 0018 Part 2.6].
 
-**Warm-up.** Build the warm-up without the knobs: they do not change what it measures. With a knob the real build's
-dry run checks `warmup_differs_only_by_the_audit_policy_and_the_artifact_limits`, the admission policy without the
-two fields against the warm-up's; a warm-up built with a knob fails it, and so does a replay of 299 or 300 s, since
-a knobbed manifest is never the warm-up's and the `cmp` guard cannot fire [V]. Without the variables the rebuild of
-`0ef600b4` from its S20 inputs gives the same run id and byte-identical inputs, policies and manifest [V].
+**Warm-up.** Build the warm-up without the artifact, lane and window knobs: they do not change what it measures.
+With an artifact knob the real build's dry run checks `warmup_differs_only_by_the_audit_policy_and_the_artifact_limits`,
+the admission policy without the two fields against the warm-up's; a warm-up built with a knob fails it, and so does
+a replay of 299 or 300 s, since a knobbed manifest is never the warm-up's and the `cmp` guard cannot fire [V]. The
+lane and window knobs are taken out the same way: the audit policy without `max_running_jobs` and
+`first_window_rounds` must still differ from the warm-up's, so a replay of 299 or 300 s is refused with them too
+(`test_with_the_lane_or_window_knobs_the_warm_up_check_still_refuses_the_warm_up_window`) [V]; step 7 refuses a
+warm-up that signs either. `HT_D20_AUDITORS` is the exception: it is the training, so build the warm-up with the
+same N (above). Without the variables the rebuild of `0ef600b4` from its S20 inputs gives the same run id and
+byte-identical inputs, policies and manifest [V].
 
 About 5 s for `dense-0.03b` [V] (11 s for `dense-0.1b` [V], 20 s on a host at load 338 [V]). Each build prints
 `"param_count": 31462656` and `"init_state_hash": "e372a68e…0aa6"` for `dense-0.03b` (44045568 and
@@ -285,8 +289,12 @@ w, r = (Path(p) for p in sys.argv[1:3])
 read = lambda d, n: json.loads((d / n).read_bytes())
 assert (w / "inputs/training.json").read_bytes() == (r / "inputs/training.json").read_bytes()
 p = [read(d, "inputs/policies.json") for d in (w, r)]
-window = ("reaudit_rounds", "gap_cap_rounds", "max_running_jobs", "first_window_rounds")
-print([{k: x["audit"].pop(k, None) for k in window} for x in p])
+assert "first_window_rounds" not in p[0]["audit"] and p[0]["audit"]["max_running_jobs"] == 2, "warm-up knob"
+lanes = {k: p[1]["audit"].pop(k) for k in ("max_running_jobs", "first_window_rounds") if k in p[1]["audit"]}
+p[0]["audit"].pop("max_running_jobs")
+window = [{k: x["audit"].pop(k, None) for k in ("reaudit_rounds", "gap_cap_rounds")} for x in p]
+print(window, lanes)
+assert window[0]["reaudit_rounds"] != window[1]["reaudit_rounds"], "the warm-up's own window: STOP (step 4)"
 limits = p[1]["admission"]["artifact_limits"]  # the knobs sign their bounds in the real run only
 knobs = {k: limits.pop(k) for k in ("max_refs", "max_parts") if k in limits}
 print(knobs)
@@ -300,9 +308,11 @@ print("same training and policies; only the audit window, the bounds printed abo
 PY
 ```
 
-   It prints the two windows (`reaudit_rounds` 200 and `gap_cap_rounds` 305 for the warm-up) and the real run's
-   artifact bounds, and exits 0 only if `training.json` is the same (image digest, model, init state), the policies
-   differ only in `audit.reaudit_rounds` and `gap_cap_rounds` (and the real run's `admission.artifact_limits`
+   It prints the two windows (`reaudit_rounds` 200 and `gap_cap_rounds` 305 for the warm-up), the real run's lanes
+   and first window, and its artifact bounds, and exits 0 only if `training.json` is the same (image digest, model,
+   init state), the warm-up signs two lanes and no first window, the real run's `reaudit_rounds` is not the
+   warm-up's (the STOP of step 4, whatever knob the real build sets), the policies differ only in
+   `audit.reaudit_rounds` and `gap_cap_rounds` (and the real run's `admission.artifact_limits`
    `max_refs`/`max_parts`, and its `audit.max_running_jobs` and `first_window_rounds` when it sets the ADR 0018
    knobs), and the manifests differ only in `network.audit_policy_hash` (and then
    `network.admission_policy_hash`): the checks of `test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window`
