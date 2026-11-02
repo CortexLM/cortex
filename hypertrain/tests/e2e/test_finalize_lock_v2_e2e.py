@@ -31,6 +31,7 @@ from hypertrain.aggregator import tape_v2
 from hypertrain.aggregator.core import FinalityError, TapeError, TapeIntegrityError
 from hypertrain.challenge import store as store_module
 from hypertrain.challenge.store import FINALITY_VERDICTS, ChallengeError, ChallengeStore
+from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
 
@@ -234,6 +235,85 @@ def test_a_beacon_round_is_accepted_while_a_finalize_replays_the_tape(
     # entered at (ADR 0017 T1, D157).
     closure = store._record_v2(restored.run, "replayed-finality", "0")
     assert closure["finalized_beacon"] == number, f"entered at {number - 1}"
+
+
+def test_a_service_charge_waits_for_the_entry_gate_of_a_finalize_and_runs_while_it_replays(
+    restored: Restored, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0017 T1 and T2 on one store: the finalize's entry transaction holds the store lock and
+    its gate's SAVEPOINT, and the charge reads its guard under that lock, so it waits instead of
+    answering 409 SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION and runs once that transaction
+    committed. A charge made while the finalize replays is served at once: the replay holds
+    neither the lock nor a transaction.
+
+    A store hosts one run, and only a run without a service boundary is gated, so the charge is
+    that run's own: like an uncontended charge of it, it is granted and debits nothing.
+    """
+    _, raw = aggregated(restored)
+    store, run, view = restored.store, restored.run, restored.now
+    in_gate, release_gate = threading.Event(), threading.Event()
+    replaying, release_replay = threading.Event(), threading.Event()
+    fresh = store._fresh_v2
+
+    def charge_once() -> bool:
+        return store._service_charge_v2(run, 0, "outer", 1, kind="outer", units=1)
+
+    def held_gate(manifest: Any, operation: str, rnd: int | None = None) -> int:
+        now: int = fresh(manifest, operation, rnd)
+        if operation.startswith("finalize:"):
+            in_gate.set()
+            release_gate.wait(WAIT)
+        return now
+
+    def held_replay(number: int, owned: bool) -> None:
+        if number == 0:
+            replaying.set()
+            release_replay.wait(WAIT)
+
+    monkeypatch.setattr(store, "_fresh_v2", held_gate)
+    ReplaySpy(monkeypatch, restored, after=held_replay)
+    settling = Call("finalize_v2", lambda: finalize(restored, raw))
+    calls = [settling]
+    try:
+        if not in_gate.wait(WAIT):
+            raise RuntimeError(f"the finalize never reached its entry gate: {settling.error!r}")
+        if not store._db.in_transaction:
+            raise RuntimeError("the finalize's entry transaction is not open")
+        charge = Call("_service_charge_v2", charge_once)
+        calls.append(charge)
+        # A refusal returns at once; the window only bounds how long a starved thread may take.
+        refused = charge.ended.wait(SERVED_WITHIN)
+        release_gate.set()
+        reached_replay = replaying.wait(WAIT)
+        during = Call("_service_charge_v2 during the replay", charge_once)
+        calls.append(during)
+        served_while_replaying = during.ended.wait(SERVED_WITHIN) and not settling.ended.is_set()
+    finally:
+        release_gate.set()
+        release_replay.set()
+        for call in calls:
+            call.thread.join(WAIT)
+
+    assert not refused, f"the charge did not wait for the entry gate: {charge.error!r}"
+    assert not any(call.thread.is_alive() for call in calls), "a thread never returned: deadlock"
+    if not reached_replay:
+        raise RuntimeError(f"the finalize never reached its replay: {settling.error!r}")
+    assert served_while_replaying, "a charge made during the finalize's replay waited for it"
+    charged = store._db.execute(
+        "SELECT id FROM records_v2 WHERE run_id=? AND kind=?", (run, "service-charge")
+    ).fetchall()
+    assert [(c.error, c.result) for c in (charge, during)] == [(None, True)] * 2
+    assert charged == []
+    assert settling.error is None, f"the finalize failed: {settling.error!r}"
+    assert settling.result["status"] == "SETTLED"
+    # Its gate's one pin, rolled back with the SAVEPOINT and written by the settling transaction.
+    [(signature,)] = store._db.execute("SELECT signature FROM beacon WHERE round=?", (view,))
+    pins = store._db.execute(
+        "SELECT * FROM beacon_pins_v2 WHERE operation_id LIKE ?", ("finalize:%",)
+    ).fetchall()
+    assert [tuple(row) for row in pins] == [
+        (run, f"finalize:0:{view}", view, signature, sha256_hex(bytes.fromhex(signature)), 0, None)
+    ]
 
 
 def test_the_store_lock_is_held_for_less_than_a_second_by_a_finalize_that_replays_for_longer(
