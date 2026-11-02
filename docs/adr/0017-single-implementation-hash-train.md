@@ -397,12 +397,20 @@ unpause, `restarts=0`, no genesis and no open round, on `b3af43f` with run `0ef6
 once]. It does not cover other requests on that store
 (`livrables/forge/2026-10-31_v3-weights-hardening/REPORT.md:293`) [A].
 
-**Left for the train.** Wrap the guard and the `with self._tx():` block in `with self._lock:` (re-entrant) and
-publish staged rounds first in a child store
-(`livrables/forge/2026-10-31_v3-weights-hardening/REPORT.md:258-266`) [A]; one owned name. Neither part is
-written yet.
+**Left for the train.** Read the guard under the store lock. The first wording of this record wrapped the guard
+AND the `with self._tx():` block in `with self._lock:`; that form is WRONG and is replaced by the form lot T2
+delivers (`a9b00a6e`, branch `relay/cortex/adr0017-t2-service-charge-lock--2c0135fe`): the lock is taken for the
+guard alone, released, and `_tx` then runs as before. Lens measured that the wrapped form grants a charge after
+its reservation deadline in 4 scenarios, one of them with no contention, and leaves a staged round unwritten,
+because `_tx` is no longer the outermost transaction; T2 refuses all four (409 `SERVICE_RESOURCE_DEADLINE`)
+(`livrables/lens/2026-11-02_porte-adr0017-t2.md`) [V, measured]. One owned name, `_service_charge_v2`. Written
+and reviewed in T2.
 
-**Cost.** The hash; the two strict xfails flip to plain tests.
+Note for the runbook: the charge now waits for the store lock without a timeout while it holds the host file
+lock, where it used to answer 409 and burn the attempt; bound it later if a stalled holder is ever seen (Lens N1).
+
+**Cost.** The hash (T2 alone: s100 pin `24fbe36d…` to `e400333d…`, example pin `7af135ca…` to `38dc51ce…`); the
+strict xfails flip to plain tests (done in T2).
 
 **Recommendation.** Include it: the change is small and its red tests exist. Keep the runbook until the swap.
 
