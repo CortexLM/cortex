@@ -4,6 +4,8 @@ The bytes are the run's own `manifest.json`, `policy-audit.json` and `policy-adm
 (S20 real out dir). The hotfix must not move the run id, the audit policy hash, the policy it
 names or the implementation hash its capacity binding carries: the TEST stack keeps serving that
 run after the server image swap, and its round 0 is settled with 1,000,000 units to be paid once.
+The ADR 0017 hash train (T1 + T2 + T3) moves the implementation hash once, on purpose; the run
+id and both policy digests stay.
 """
 
 from __future__ import annotations
@@ -19,8 +21,9 @@ RUN = Path(__file__).parent / "fixtures/0ef600b4"
 RUN_ID = "0ef600b46c2f3afee2912d9b0dd58decf8e6a62dded8fcb73857c5faaf5d22f6"
 AUDIT_POLICY = "86ac1ac32d0b1759b59f4020616c85b6ca0170ad59ea97231b0fba06283ed761"
 ADMISSION_POLICY = "7a881925a875af6cdbf46e2ab051f1deb553b9a02fbb7cc85530304c7d2682e1"
-# What the running challenge served for this run (S20 ident-newrun.json, tools/ident.py).
-IMPLEMENTATION_HASH = "24fbe36d2496830d437140d64b1744c5a5a98ec973dd4a04f2e02d8106c185ce"
+# The hash train's value under this run's pin (ADR 0017); the running challenge served
+# 24fbe36d... before it (S20 ident-newrun.json, tools/ident.py).
+IMPLEMENTATION_HASH = "e98564bedd03306695072841054a61d8530d7f170a2314c17ee2e84eb2a75943"
 IMPLEMENTATION_PATHS = (
     "aggregator/core.py",
     "aggregator/tape_v2.py",
