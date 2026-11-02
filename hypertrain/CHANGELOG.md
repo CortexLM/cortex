@@ -401,8 +401,13 @@
   reaper, the contest hold and the retirement gate read it; each lease keeps `AuditJobV2`'s two-lease
   bound, and a rearm never ends before the job's first window. Both are refused outside a TEST
   ledger, and `live_operator.py open` refuses a gap below a signed window. `schedule_audits_v2` and
-  `lease_v2` are owned: `implementation_hash` moves (24fbe36d... -> d4694fa9... under the s100 pin,
-  for T3 alone); no pinned manifest, run id or policy hash changes.
+  `lease_v2` are owned: `implementation_hash` moves with the hash train (next entry); no pinned
+  manifest, run id or policy hash changes.
+- `implementation_hash` moves once for the ADR 0017 hash train, which ships T1 (`finalize_v2`), T2
+  (`_service_charge_v2`) and T3 (`schedule_audits_v2`, `lease_v2`) together: `24fbe36d...` ->
+  `e98564be...` under the s100 pin (`avx2`/`sm_103`/`math`, the golden test of run 0ef600b4) and
+  `7af135ca...` -> `31150269...` under the example pin (`avx2`/`none`). No other owned name moves;
+  the run ids and the audit and admission policy digests of f3901a09 and 0ef600b4 do not change.
 
 ### Fixed
 - A restarted master witnesses the beacon pauses of its runs again (TEST 31/10, runs 0ef600b4 and
@@ -450,8 +455,17 @@
   replay that keeps the pusher out longer than the cap no longer answers 503; the round is
   closed, its rewards vest and the ledger accepts the Finalize at the round a healthy view holds
   when the replay ends, not at the gate's round; a round already finalized is answered without
-  it. That changes `finalize_v2`, so `implementation_hash` moves (24fbe36d... -> 8235e5f5... for
-  the gate alone); no manifest, run id, policy hash or wire format changes.
+  it. That changes `finalize_v2`, so `implementation_hash` moves with the hash train (Changed);
+  no manifest, run id, policy hash or wire format changes.
+- A service charge (`_service_charge_v2`, the genesis or outer capacity attempt of a
+  service-admitted run) made while another thread holds its store's transaction (a beacon push,
+  D128; the weights answer window; a forwarded push) waits for it and is granted, with the record
+  an uncontended charge writes, instead of answering 409
+  `SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION` and burning the attempt (ADR 0017, T2). The guard
+  is read under the store lock, then released, so the charge's own transaction still writes the
+  rounds staged meanwhile before its deadline check. A charge made inside its caller's own
+  transaction is still refused. That changes `_service_charge_v2`, so `implementation_hash` moves
+  with the hash train (Changed).
 - `GET /internal/v1/get_weights` no longer answers 409 `RUN_MANIFEST_RETIRED` for the whole state
   directory when one hosted run has a stored manifest the model now refuses (S21, run 0ef600b4: the
   stale TEST runs 2a7d7702 and fea7e44f lacked the env pin, so the settled round 0 could not be
