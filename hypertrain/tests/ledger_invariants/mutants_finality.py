@@ -54,6 +54,10 @@ LEDGER_FINALITY = (
 )
 CAUSE_REFUSED = T2 + "test_a_rollback_cause_the_referee_did_not_sign_with_evidence_is_refused"
 CAUSE_SET = T2 + "test_a_rollback_that_cites_a_cause_it_does_not_rest_on_is_refused"
+STORED_EXPIRED = (
+    "tests/ledger_invariants/test_gaps_ledger.py::"
+    "test_a_stored_finalize_is_not_answered_to_an_expired_envelope_and_is_to_a_fresh_one"
+)
 EXCLUDE_CLOSES = T + "test_an_exclusion_closes_a_round_only_when_no_applied_tape_is_left_to_repair"
 CHALLENGE_SIGNER = T + "test_an_audit_challenge_the_reward_authority_did_not_sign_credits_nobody"
 SELF_AUDIT = T + "test_a_miner_is_not_credited_for_a_verdict_it_signed_itself"
@@ -595,8 +599,11 @@ MUTANTS = [
         "src/hypertrain/protocol/envelope_v2.py",
         "        if now_round > env.exp_drand:\n",
         "        if False:\n",
-        [FINALIZE_MATRIX],
-        "A Finalize whose signed expiry has passed settles the round.",
+        # ADR 0017 T1: finalize_v2's entry refuses a gated round's expired Finalize again at the
+        # gate's round (two guards, README); a stored round's answer has this check alone.
+        [FINALIZE_MATRIX, STORED_EXPIRED],
+        "A Finalize whose signed expiry has passed settles the round, or is answered the stored "
+        "result of one that did.",
     ),
     mutant(
         "open-starts-from-any-public-theta",
