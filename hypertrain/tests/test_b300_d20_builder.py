@@ -906,6 +906,33 @@ def test_a_warm_up_that_lists_other_auditors_did_not_measure_the_run(host, tmp_p
 
 
 @pytest.mark.parametrize(
+    "knobs",
+    [
+        {"HT_D20_AUDIT_LANES": "1"},
+        {
+            "HT_D20_AUDIT_CYCLE_SECONDS": "229",
+            "HT_D20_AUDIT_ROSTER": "5",
+            "HT_D20_AUDIT_HOSTS": "2",
+        },
+    ],
+    ids=["lane_knob", "window_knobs"],
+)
+def test_with_the_lane_or_window_knobs_the_warm_up_check_still_refuses_the_warm_up_window(
+    host, tmp_path, knobs
+):
+    # 299 s asks the warm-up's re-audit window and cap: the lane and window knobs make another
+    # audit policy, so the manifest is not the warm-up's and the guard of step 6 does not fire,
+    # but without the two fields the policy is the warm-up's, which the dry run must see.
+    _, real, _, second = two_builds(host, tmp_path, "299", "dense-0.03b", knobs)
+
+    assert second.returncode == 1 and "DRY-RUN VALIDATION FAILED" in second.stderr
+    report = dry_run_report(second)
+    assert report["audit"]["reaudit_rounds"] == 200 and report["checks"]["warmup_same_training"]
+    assert not report["checks"]["warmup_differs_only_by_the_audit_policy"]
+    assert not any((real / d).exists() for d in ("inputs", "out", "state"))
+
+
+@pytest.mark.parametrize(
     ("env", "named", "stages"),
     [
         ({"HT_D20_AUDITORS": "1"}, "HT_D20_AUDITORS must be 2..9", 0),
