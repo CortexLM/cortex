@@ -54,12 +54,13 @@ class Halting:
         return self.client.post(url, *args, **kwargs)
 
 
-def committed_round(n, *forgers):
-    """Round 0 of every identity up to the request that would schedule the audits."""
+def committed_round(n, *forgers, **opening):
+    """Round 0 of every identity up to the request that would schedule the audits; `opening` goes
+    to `execute_round` (its `gap`)."""
     real = n.client
     n.client = Halting(real, "/audits")
     try:
-        rollback.execute_round(n, 0, forge={k.ss58: LIE for k in forgers})
+        rollback.execute_round(n, 0, forge={k.ss58: LIE for k in forgers}, **opening)
     except Halt:
         pass
     else:

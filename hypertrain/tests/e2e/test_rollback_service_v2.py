@@ -230,10 +230,12 @@ def execute_round(
     silent=(),
     skip_delta=(),
     aggregate=True,
+    gap=169,
 ):
     """One real round for `hotkeys`; `forge` maps a hotkey to CommitV2 fields it lies about,
     `silent` members are rostered but never accept or commit, `skip_delta` members commit and
-    never upload their delta; `aggregate=False` returns the RoundOpenV2 after the audits."""
+    never upload their delta; `aggregate=False` returns the RoundOpenV2 after the audits; `gap`
+    is the round's d_final - d_audit."""
     import anyio
     import httpx
     import torch
@@ -321,7 +323,7 @@ def execute_round(
         d_commit=network.now + 30,
         d_audit=network.now + 31,
         d_upload=network.now + 150,
-        d_final=network.now + 200,
+        d_final=network.now + 31 + gap,
         contract_version=2,
         policy_hashes=PolicyHashes.model_validate(
             {k: getattr(manifest.network, k) for k in PolicyHashes.model_fields}
