@@ -87,7 +87,7 @@ expiry do not. [V] `protocol/messages_v2.py:243-249`
    [ADR 0011](../../docs/adr/0011-audit-integrity.md) Part 9 decision 9. Keep `max_running_jobs` at 2 and
    leave `first_window_rounds` out: audit lanes other than 2 and a signed first audit window are for a TEST
    manifest only, and the build and the master refuse them on a production ledger (ADR 0018). [V]
-   `protocol/messages_v2.py:832-837`
+   `protocol/messages_v2.py:833-838`
 
 ## S1 K_owner signs the manifest (runbook step 2)
 

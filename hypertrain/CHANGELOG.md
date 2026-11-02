@@ -73,7 +73,8 @@
   the operator tool opens rounds whose `d_final - d_audit` reaches N. Below 200 or below the gap the
   re-audit window needs, the build is refused (exit 1, nothing left); the manifest stage refuses N above
   `2 * absolute_rounds + reaudit window` (500 for a window of 100). A wider gap does not lengthen an
-  audit job: it still expires at `min(d_final, d_audit + 2 * lease_rounds)` and may be rearmed once for
+  audit job: it still expires at `min(d_final, d_audit + 2 * lease_rounds)` (unless the audit policy
+  also signs `first_window_rounds`, ADR 0018) and may be rearmed once for
   another `2 * lease_rounds`, up to `d_final`. Without the variable the build is unchanged: the rebuild
   of run `f3901a09` from its S17d inputs gives the same run id and byte-identical inputs, policies and
   manifest.
