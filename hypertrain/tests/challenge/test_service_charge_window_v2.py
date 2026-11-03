@@ -378,3 +378,24 @@ def test_a_charge_made_inside_its_own_open_transaction_is_still_refused(hosted):
     assert charges(child, run_id) == []
     assert child._service_charge_v2(run_id, 0, "outer", 1, kind="outer", units=units)
     assert charges(child, run_id) == [outer_charge(child, run_id, units)]
+
+
+def test_a_charge_made_by_a_thread_that_holds_the_store_lock_without_a_transaction_is_granted(
+    hosted,
+):
+    # Given: the calling thread holds the lock of the store that hosts the run, and no
+    # transaction is open (the case the guard's comment names: `_tx` takes the lock again).
+    _, child, manifest = hosted
+    run_id = manifest.run_id()
+    units = outer_units(child, run_id)
+    with child._lock:
+        if child._db.in_transaction:
+            pytest.fail("a transaction is open on the store")
+        # When: it charges under that lock.
+        try:
+            answer = child._service_charge_v2(run_id, 0, "outer", 1, kind="outer", units=units)
+        except Exception as error:
+            answer = (error.status, error.detail) if isinstance(error, ChallengeError) else error
+    # Then: it is granted, not refused as a charge inside its own transaction, and debited once.
+    assert answer is True
+    assert charges(child, run_id) == [outer_charge(child, run_id, units)]

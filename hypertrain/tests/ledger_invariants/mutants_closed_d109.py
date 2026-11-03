@@ -23,11 +23,16 @@ window test reads it without the lock again. Another patch holds the lock across
 `_tx`, the wrap the ADR first proposed: that `_tx` is then not outermost and writes no staged
 round, which the forwarded-push and staged-deadline tests each kill (one mutant per test). The
 guard mutant pins what the guard still adds, the mapped 409 for a charge inside its caller's own
-transaction.
+transaction. Lens's M31 (T2 gate) refuses whoever holds the lock instead: a charge made under the
+lock with no transaction open, which `_tx` serves, kills it.
 
 What no test or mutant covers: the order in which the store locks are taken. Every path that holds
 two of them takes the root first and the children in load order (read in review, not pinned), and
-a child lock is now held until the root commits.
+a child lock is now held until the root commits. Nor a charge whose caller holds the lock while a
+round is staged: its `_tx` is not outermost, so that round is neither written nor seen by its
+deadline check. No caller charges under the lock (the two charges run from the capacity attempt,
+`store.py:5480-5486` and `:10500-10506`, built after their transaction closed), so the lock-holder
+control charges with nothing staged.
 
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
@@ -74,6 +79,10 @@ FORWARDED_PUSH = (
 STAGED_DEADLINE = (
     WINDOW
     + "test_a_charge_behind_a_lock_holder_checks_its_deadline_with_the_round_staged_meanwhile"
+)
+LOCK_HOLDER = (
+    WINDOW
+    + "test_a_charge_made_by_a_thread_that_holds_the_store_lock_without_a_transaction_is_granted"
 )
 UNRETRIED = (
     "tests/ledger_invariants/test_weights_2.py::"
@@ -282,6 +291,16 @@ MUTANTS = [
             ),
         )
     ),
+    {
+        "id": "d109-charge-refuses-a-lock-holder-without-a-transaction",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": "        with self._lock:\n" + CHARGE_GUARD,
+        "new": CHARGE_GUARD_UNLOCKED.replace("self._db.in_transaction", "self._lock._is_owned()"),
+        "tests": [LOCK_HOLDER],
+        "why": "a caller that holds the store lock with no transaction open is refused with the "
+        "409 of a charge inside its own transaction, though `_tx` serves it (Lens M31).",
+    },
     {
         "id": "d109-failed-commit-left-open",
         "invariants": ["WGT-15", "FIN-25"],
