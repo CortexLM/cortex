@@ -19,12 +19,15 @@ from typing import Any
 import pytest
 
 from hypertrain.aggregator.core import FinalityError
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, RESULT_PAUSE_ROUNDS
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2, FinalityEvidence
 from hypertrain.protocol.envelope import ExpiredError, UnauthorizedSigner, body_digest
+from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import CommitV2
 
 from . import support_exit_roster as X
@@ -496,6 +499,80 @@ def test_a_settled_finalize_keeps_the_one_pin_of_its_gate(stage: Stage) -> None:
     assert finalize_pins(stage) == [
         (stage.run_id, f"finalize:0:{view}", view, signature, digest, 0, None)
     ]
+
+
+# -- FIN-01 / FIN-23: the entry transaction judges the run and the expiry of its gate (T1) -------
+
+OTHER_RUN = sha256_hex(b"a run the coordinator also signs for")
+
+
+def lag_by(stage: Stage, rounds: int) -> None:
+    """The wall clock `rounds` emitted rounds past the stored view, no round pushed."""
+    genesis = stage.network.manifest.training.beacon.genesis_time
+    stage.store.clock = lambda: genesis + (stage.network.now - 1 + rounds) * 3
+
+
+def test_a_finalize_sealed_for_another_run_is_refused_as_such_while_the_gate_is_paused(
+    stage: Stage,
+) -> None:
+    """FIN-01+SG-01 (ADR 0017 T1, Lens MIN-3): the entry transaction checks the run the Finalize
+    is sealed for before it judges the beacon gate. During a pause, the coordinator's Finalize for
+    this run meets the gate's 503; the same body sealed for another run is refused as such, and
+    neither writes anything."""
+    lag_by(stage, MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS + 1)  # past the pause a finalize tolerates
+    foreign = seal(
+        stage.coordinator, "Finalize", OTHER_RUN, Finalize(**stage.finalize_body()), 10000
+    )
+    before = stage.digest()
+    paused = stage.post_finalize(0, stage.signed_finalize())
+    X.control(
+        (paused.status_code, paused.json()["detail"]) == (503, "beacon infrastructure paused"),
+        f"the gate refuses this run's own Finalize: {paused.text}",
+    )
+
+    refused = stage.post_finalize(0, foreign)
+
+    assert (refused.status_code, refused.json()["detail"]) == (
+        409,
+        "envelope belongs to another run",
+    )
+    assert stage.digest() == before
+    nothing_was_finalized(stage)
+
+
+def test_a_finalize_expiring_at_the_round_its_gate_judges_settles_and_one_round_earlier_not(
+    stage: Stage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIN-23+FIN-04 (ADR 0017 T1, Lens MIN-3): through a pause an audited round's finalize
+    tolerates, the entry gate judges the signed expiry at the round a healthy view holds, past the
+    stored view. A Finalize that expires one round before it is refused there, before any replay,
+    with nothing written (the ledger refuses it too, but only after the replay); one that expires
+    at it is live there and settles."""
+    view, lag = stage.network.now, MAX_LAG_ROUNDS + 10  # within RESULT_PAUSE_ROUNDS
+    lag_by(stage, lag)
+    gate = view + lag - MAX_LAG_ROUNDS
+    X.control(stage.store._now(stage.store._db) == view < gate - 1, "the view lags the gate")
+    replay = stage.store._run_finality_replay_v2
+    replays: list[Any] = []
+
+    def counted(job: Any) -> str:
+        replays.append(job)
+        theta: str = replay(job)
+        return theta
+
+    monkeypatch.setattr(stage.store, "_run_finality_replay_v2", counted)
+    stage.store._finality_verdicts_v2.clear()  # no verdict kept by an earlier test: it replays
+    before = stage.digest()
+
+    expired = stage.post_finalize(0, stage.signed_finalize(expiry=gate - 1))
+
+    assert (expired.status_code, expired.json()["detail"]) == (409, "envelope expired")
+    assert replays == []
+    assert stage.digest() == before
+    nothing_was_finalized(stage)
+    settled = stage.post_finalize(0, stage.signed_finalize(expiry=gate))
+    assert (settled.status_code, settled.json().get("status")) == (200, "SETTLED"), settled.text
+    assert len(replays) == 1
 
 
 # -- FIN-06 / FIN-07: one credit per miner and round, rounds minted in order ----------------------

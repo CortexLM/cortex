@@ -54,6 +54,14 @@ ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
 PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
 PIN_SETTLED = ATOMIC + "test_a_settled_finalize_keeps_the_one_pin_of_its_gate"
 CANNOT_SETTLE = ATOMIC + "test_finalize_refuses_a_round_that_may_not_settle_and_writes_nothing"
+# Lens MIN-3: what only the entry transaction checks before its gate, the run and the expiry.
+FOREIGN_RUN = (
+    ATOMIC + "test_a_finalize_sealed_for_another_run_is_refused_as_such_while_the_gate_is_paused"
+)
+GATE_EXPIRY = (
+    ATOMIC
+    + "test_a_finalize_expiring_at_the_round_its_gate_judges_settles_and_one_round_earlier_not"
+)
 BOUNDARY = (
     "tests/challenge/test_capacity_outer_v2.py::"
     "test_prepared_profile_opening_metadata_without_tensor_calls[final-honest]"
@@ -476,6 +484,42 @@ MUTANTS = [
         "new": "",
         "tests": [PIN_SETTLED],
         "why": "a settled round keeps no trace of the beacon round its gate was judged at.",
+    },
+    {
+        "id": "exp-finalize-entry-reads-the-run-of-its-envelope",
+        "invariants": ["FIN-01", "SG-01"],
+        "path": STORE,
+        "old": (
+            '            envelope_v2.Intake(run_id, {"Finalize": '
+            "manifest.training.coord_pubkey.__eq__}).accept(\n"
+        ),
+        "new": (
+            '            envelope_v2.Intake(env.run_id, {"Finalize": '
+            "manifest.training.coord_pubkey.__eq__}).accept(\n"
+        ),
+        "tests": [FOREIGN_RUN],
+        "why": "a Finalize sealed for another run meets the beacon gate before its run is checked: "
+        "a pause answers it 503, not the run refusal (Lens L28).",
+    },
+    {
+        "id": "exp-finalize-expires-at-the-round-its-gate-judges",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "                if now > env.exp_drand:\n",
+        "new": "                if now >= env.exp_drand:\n",
+        "tests": [GATE_EXPIRY],
+        "why": "a Finalize signed to expire at the round its gate judges is refused at that round, "
+        "where its expiry still holds (Lens L13).",
+    },
+    {
+        "id": "exp-finalize-expires-a-round-late-at-its-gate",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "                if now > env.exp_drand:\n",
+        "new": "                if now > env.exp_drand + 1:\n",
+        "tests": [GATE_EXPIRY],
+        "why": "a Finalize that expired one round before the round its gate judges is replayed "
+        "before the ledger refuses it.",
     },
     {
         "id": "exp-finalize-replay-compares-nothing",
