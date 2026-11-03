@@ -501,6 +501,40 @@ def test_a_settled_finalize_keeps_the_one_pin_of_its_gate(stage: Stage) -> None:
     ]
 
 
+def test_a_round_pushed_during_the_unlocked_replay_dates_the_close_not_the_gates_pin(
+    stage: Stage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIN-04 (ADR 0017 T1, Lens MIN-4): a beacon round pushed while the finalize's prime replays
+    the tape, before the settling transaction, dates the close (D157), and the settling
+    transaction still writes the pin its entry gate judged, under the entry view's operation: the
+    round that landed is not the one the gate pinned."""
+    view = stage.store._now(stage.store._db)
+    replay = stage.store._run_finality_replay_v2
+    landed: list[tuple[bool, bool, int]] = []
+
+    def replay_then_push(job: Any) -> str:
+        theta: str = replay(job)
+        if not landed:  # the first replay, the prime's: no transaction, the lock free
+            in_transaction, owned = stage.store._db.in_transaction, stage.store._lock._is_owned()
+            if not owned:  # a push would wait for ever for the lock this thread holds
+                stage.network.push(view + 1)
+            landed.append((in_transaction, owned, stage.store._now(stage.store._db)))
+        return theta
+
+    monkeypatch.setattr(stage.store, "_run_finality_replay_v2", replay_then_push)
+    stage.store._finality_verdicts_v2.clear()  # no verdict kept by an earlier test: it replays
+
+    assert stage.finalize()["status"] == "SETTLED"
+
+    X.control(landed == [(False, False, view + 1)], f"a round landed during the replay: {landed}")
+    assert stage.record("replayed-finality", "0")["finalized_beacon"] == view + 1
+    [(signature,)] = stage.rows("SELECT signature FROM beacon WHERE round=?", view)
+    digest = sha256_hex(bytes.fromhex(signature))
+    assert finalize_pins(stage) == [
+        (stage.run_id, f"finalize:0:{view}", view, signature, digest, 0, None)
+    ]
+
+
 # -- FIN-01 / FIN-23: the entry transaction judges the run and the expiry of its gate (T1) -------
 
 OTHER_RUN = sha256_hex(b"a run the coordinator also signs for")

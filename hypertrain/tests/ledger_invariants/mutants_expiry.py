@@ -53,6 +53,13 @@ S21_UNSIGNED = (
 ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
 PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
 PIN_SETTLED = ATOMIC + "test_a_settled_finalize_keeps_the_one_pin_of_its_gate"
+# Lens MIN-4: the pin the settling transaction writes when a round lands during the replay.
+PIN_BEAT = (
+    ATOMIC + "test_a_round_pushed_during_the_unlocked_replay_dates_the_close_not_the_gates_pin"
+)
+PIN_INSERT = (
+    '            self._db.executemany("INSERT INTO beacon_pins_v2 VALUES(?,?,?,?,?,?,?)", pins)\n'
+)
 CANNOT_SETTLE = ATOMIC + "test_finalize_refuses_a_round_that_may_not_settle_and_writes_nothing"
 # Lens MIN-3: what only the entry transaction checks before its gate, the run and the expiry.
 FOREIGN_RUN = (
@@ -520,6 +527,37 @@ MUTANTS = [
         "tests": [GATE_EXPIRY],
         "why": "a Finalize that expired one round before the round its gate judges is replayed "
         "before the ledger refuses it.",
+    },
+    {
+        "id": "exp-finalize-pin-named-at-the-settling-view",
+        "invariants": ["FIN-04"],
+        "path": STORE,
+        "old": PIN_INSERT,
+        "new": (
+            "            self._db.executemany(\n"
+            '                "INSERT INTO beacon_pins_v2 VALUES(?,?,?,?,?,?,?)",\n'
+            '                [(p[0], f"finalize:{w}:{self._now(self._db)}", *p[2:])'
+            " for p in pins],\n"
+            "            )\n"
+        ),
+        "tests": [PIN_BEAT],
+        "why": "a round pushed during the replay renames the gate's pin after the settling view, "
+        "a view no gate judged.",
+    },
+    {
+        "id": "exp-finalize-pin-dated-at-the-settling-view",
+        "invariants": ["FIN-04"],
+        "path": STORE,
+        "old": PIN_INSERT,
+        "new": (
+            "            self._db.executemany(\n"
+            '                "INSERT INTO beacon_pins_v2 VALUES(?,?,?,?,?,?,?)",\n'
+            "                [(*p[:2], self._now(self._db), *p[3:]) for p in pins],\n"
+            "            )\n"
+        ),
+        "tests": [PIN_BEAT],
+        "why": "a round pushed during the replay moves the gate's pin to the settling view, whose "
+        "beacon its signature is not.",
     },
     {
         "id": "exp-finalize-replay-compares-nothing",
