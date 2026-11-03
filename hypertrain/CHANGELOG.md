@@ -402,7 +402,13 @@
   bound, and a rearm never ends before the job's first window. Both are refused outside a TEST
   ledger, and `live_operator.py open` refuses a gap below a signed window. `schedule_audits_v2` and
   `lease_v2` are owned: `implementation_hash` moves with the hash train (next entry); no pinned
-  manifest, run id or policy hash changes.
+  manifest, run id or policy hash changes. Before the master is rolled back to an image from before
+  T3, every run that signs `max_running_jobs` other than 2 or any `first_window_rounds` must have
+  every round closed, none opened, and no `audit_leases_v2` row queued or running: that code refuses
+  the policy, so once the run's services are built every beacon that reaches one of its lease bounds
+  fails in its lease expiry (`store.py:1017`), the root forwards it to none of the hosted stores
+  after that run (`store.py:959-960`), the beacon route answers 409, and an open round's reaper
+  fails (ADR 0018 Part 2.6).
 - `implementation_hash` moves once for the ADR 0017 hash train, which ships T1 (`finalize_v2`), T2
   (`_service_charge_v2`) and T3 (`schedule_audits_v2`, `lease_v2`) together: `24fbe36d...` ->
   `e98564be...` under the s100 pin (`avx2`/`sm_103`/`math`, the golden test of run 0ef600b4) and

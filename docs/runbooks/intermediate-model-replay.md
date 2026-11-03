@@ -127,7 +127,15 @@ GPU image its miners and references run built from `bc306dc` or later [V on the 
 `extra_forbidden`; GPU `cb52fe37` is built from `667695be` [A], forge journal 2026-10-29 21:13Z].
 `implementation_hash` does not tell those images apart. A run that signs lanes other than 2 or a first window needs
 a server image that holds ADR 0018: older code refuses its audit policy (`literal_error`, `extra_forbidden`); the
-auditor, miner and GPU images never parse it [V by reading, ADR 0018 Part 2.6].
+auditor, miner and GPU images never parse it [V by reading, ADR 0018 Part 2.6]. Before the master is rolled back
+to an image from before T3, every run that signs `max_running_jobs` other than 2 or any `first_window_rounds` must
+have every round closed (finalized or retired), none opened until a T3 image serves again, and no `audit_leases_v2`
+row `queued` or `running`. Otherwise, once a request has built that run's services (a public admission read is
+enough), every beacon that reaches one of its lease bounds fails in that store's lease expiry
+(`challenge/store.py:1017`): the error leaves its `push_beacon`, the root's loop over its hosted stores
+(`:959-960`) skips every store after it (all of them when the root hosts the run), `/v1/admin/beacon` answers 409
+and the pusher exits (`beacon/push.py:152-154`); an open round's reaper also fails, journaled `exit-failed`, on
+every beacon [V in-process: `dc014508` code on a state the train built; ADR 0018 Part 2.6].
 
 **Warm-up.** Build the warm-up without the artifact, lane and window knobs: they do not change what it measures.
 With an artifact knob the real build's dry run checks `warmup_differs_only_by_the_audit_policy_and_the_artifact_limits`,
